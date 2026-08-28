@@ -47,6 +47,8 @@ pub mod usage;
 pub mod usage_history;
 pub mod workspace;
 
+pub mod remote;
+
 mod protocol;
 
 pub use driver_wire::{decode_enum, encode_enum, event_from_wire, event_to_wire};
@@ -55,6 +57,10 @@ pub use protocol::{
     MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
     ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireComputerToolRequest,
     WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
+};
+pub use remote::{
+    IROH_ALPN, IROH_POLL_INTERVAL, IROH_RELAY_URL_ENV, IrohBridge, OFFICIAL_RELAY_URL,
+    RemoteTicket, resolve_relay_url,
 };
 pub use settings::DaemonSettings;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

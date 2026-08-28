@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use waku_protocol::MAX_WIRE_MESSAGE_BYTES;
 use waku_protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
-    ResponsePayload, RpcError, SequencedEvent, ServerMessage,
+    ClientMessage, Command, IROH_ALPN, IrohBridge, PROTOCOL_VERSION, RemoteTicket, ReplayCursor,
+    Request, ResponseOutcome, ResponsePayload, RpcError, SequencedEvent, ServerMessage,
 };
 
 const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -36,6 +36,19 @@ struct ClientInner {
     task_state_subscribers: Mutex<Vec<Sender<u64>>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
+    /// iroh runtime and endpoint for an iroh-backed connection, kept alive
+    /// until the client is dropped.
+    iroh_keepalive: Mutex<Option<IrohKeepalive>>,
+}
+
+/// Owns the tokio runtime and endpoint behind an iroh connection. Dropping
+/// this closes the QUIC connection, which is what tears down the socket
+/// thread when the last [`DaemonClient`] clone goes away. The fields are
+/// never read; holding them is the point.
+#[allow(dead_code)]
+struct IrohKeepalive {
+    runtime: tokio::runtime::Runtime,
+    endpoint: iroh::Endpoint,
 }
 
 #[derive(Clone, Copy)]
@@ -59,18 +72,6 @@ impl DaemonClient {
         token: String,
         resume_from: Vec<ReplayCursor>,
     ) -> anyhow::Result<Self> {
-        let last_sequences = resume_from
-            .iter()
-            .map(|cursor| {
-                (
-                    (cursor.session_id, cursor.runtime_id),
-                    LastSequence {
-                        epoch: cursor.epoch,
-                        sequence: cursor.sequence,
-                    },
-                )
-            })
-            .collect();
         let url = daemon_url(address)?;
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
@@ -79,30 +80,51 @@ impl DaemonClient {
             tungstenite::client::connect_with_config(url.as_str(), Some(config), 3)
                 .context("could not connect to Waku daemon")?;
         set_client_read_timeout(&mut socket, Some(Duration::from_secs(5)))?;
-        write_json(
-            &mut socket,
-            &ClientMessage::Hello {
-                protocol_version: PROTOCOL_VERSION,
-                token,
-                client_id: Uuid::new_v4(),
-                resume_from,
-            },
-        )?;
-        let hello = read_server_message(&mut socket)?;
-        match hello {
-            ServerMessage::Hello {
-                protocol_version, ..
-            } if protocol_version == PROTOCOL_VERSION => {}
-            ServerMessage::Hello {
-                protocol_version, ..
-            } => bail!(
-                "daemon protocol {protocol_version} does not match desktop protocol {PROTOCOL_VERSION}"
-            ),
-            ServerMessage::Rejected { message } => bail!("daemon rejected connection: {message}"),
-            other => bail!("daemon sent an invalid handshake response: {other:?}"),
-        }
+        finish_handshake(&mut socket, &token, &resume_from)?;
         set_client_read_timeout(&mut socket, Some(READ_POLL_INTERVAL))?;
+        Ok(Self::from_socket(socket, &resume_from))
+    }
 
+    /// Connect over iroh P2P using a daemon's published ticket.
+    ///
+    /// The ticket is a full capability: it carries both the daemon's dialable
+    /// endpoint address and the wire token that authenticates the `Hello`
+    /// exactly as it does over WebSocket. The tokio runtime and endpoint are
+    /// kept alive by the returned client for the lifetime of the connection.
+    pub fn connect_iroh(
+        ticket: &RemoteTicket,
+        resume_from: Vec<ReplayCursor>,
+    ) -> anyhow::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .thread_name("waku-daemon-client-iroh")
+            .enable_all()
+            .build()
+            .context("could not start iroh client runtime")?;
+        let endpoint = runtime
+            .block_on(bind_client_endpoint())
+            .context("failed to bind iroh client endpoint")?;
+        let connection = runtime
+            .block_on(endpoint.connect(ticket.endpoint_addr.clone(), IROH_ALPN))
+            .context("could not connect to Waku daemon over iroh")?;
+        let (send, recv) = runtime
+            .block_on(connection.open_bi())
+            .context("could not open iroh control stream")?;
+
+        let bridge = IrohBridge::new(send, recv, runtime.handle());
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));
+        let mut socket =
+            WebSocket::from_raw_socket(bridge, tungstenite::protocol::Role::Client, Some(config));
+        finish_handshake(&mut socket, &ticket.token, &resume_from)?;
+        Ok(Self::from_socket_iroh(socket, runtime, endpoint, &resume_from))
+    }
+
+    fn from_socket<S: std::io::Read + std::io::Write + Send + 'static>(
+        socket: WebSocket<S>,
+        resume_from: &[ReplayCursor],
+    ) -> Self {
+        let last_sequences = last_sequences_from(resume_from);
         let (outgoing, outgoing_rx) = unbounded();
         let inner = Arc::new(ClientInner {
             outgoing,
@@ -112,13 +134,32 @@ impl DaemonClient {
             task_state_subscribers: Mutex::new(Vec::new()),
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
+            iroh_keepalive: Mutex::new(None),
         });
         let thread_inner = inner.clone();
         std::thread::Builder::new()
             .name("waku-daemon-client".into())
             .spawn(move || run_client(socket, outgoing_rx, thread_inner))
-            .context("could not start Waku daemon client thread")?;
-        Ok(Self { inner })
+            .expect("Waku daemon client thread spawns");
+        Self { inner }
+    }
+
+    fn from_socket_iroh(
+        socket: WebSocket<IrohBridge>,
+        runtime: tokio::runtime::Runtime,
+        endpoint: iroh::Endpoint,
+        resume_from: &[ReplayCursor],
+    ) -> Self {
+        let client = Self::from_socket(socket, resume_from);
+        // Keep the runtime and endpoint alive for the life of the connection;
+        // dropping either would close the QUIC streams underneath the socket
+        // thread.
+        client
+            .inner
+            .iroh_keepalive
+            .lock()
+            .replace(IrohKeepalive { runtime, endpoint });
+        client
     }
 
     pub fn subscribe(&self, session_id: Uuid, runtime_id: Uuid) -> Receiver<SequencedEvent> {
@@ -252,8 +293,8 @@ fn daemon_url(address: &str) -> anyhow::Result<String> {
     Ok(url.into())
 }
 
-fn run_client(
-    mut socket: WebSocket<MaybeTlsStream<TcpStream>>,
+fn run_client<S: std::io::Read + std::io::Write>(
+    mut socket: WebSocket<S>,
     outgoing: Receiver<Outgoing>,
     inner: Arc<ClientInner>,
 ) {
@@ -361,6 +402,67 @@ fn run_client(
     inner.task_state_subscribers.lock().clear();
 }
 
+/// Exchange the wire `Hello` with the daemon and verify the response. Shared
+/// by the WebSocket and iroh transports; both speak the same versioned JSON
+/// framing.
+fn finish_handshake<S: std::io::Read + std::io::Write>(
+    socket: &mut WebSocket<S>,
+    token: &str,
+    resume_from: &[ReplayCursor],
+) -> anyhow::Result<()> {
+    write_json(
+        socket,
+        &ClientMessage::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            token: token.to_owned(),
+            client_id: Uuid::new_v4(),
+            resume_from: resume_from.to_vec(),
+        },
+    )?;
+    match read_server_message(socket)? {
+        ServerMessage::Hello {
+            protocol_version, ..
+        } if protocol_version == PROTOCOL_VERSION => {}
+        ServerMessage::Hello {
+            protocol_version, ..
+        } => bail!(
+            "daemon protocol {protocol_version} does not match desktop protocol {PROTOCOL_VERSION}"
+        ),
+        ServerMessage::Rejected { message } => bail!("daemon rejected connection: {message}"),
+        other => bail!("daemon sent an invalid handshake response: {other:?}"),
+    }
+    Ok(())
+}
+
+fn last_sequences_from(resume_from: &[ReplayCursor]) -> HashMap<(Uuid, Uuid), LastSequence> {
+    resume_from
+        .iter()
+        .map(|cursor| {
+            (
+                (cursor.session_id, cursor.runtime_id),
+                LastSequence {
+                    epoch: cursor.epoch,
+                    sequence: cursor.sequence,
+                },
+            )
+        })
+        .collect()
+}
+
+async fn bind_client_endpoint() -> anyhow::Result<iroh::Endpoint> {
+    let relay_url = waku_protocol::resolve_relay_url()?;
+    let secret_key = iroh::SecretKey::generate();
+    let relay_map =
+        iroh::RelayMap::from(relay_url).with_auth_token(secret_key.public().to_string());
+    iroh::endpoint::Endpoint::builder(iroh::endpoint::presets::N0)
+        .secret_key(secret_key)
+        .relay_mode(iroh::RelayMode::Custom(relay_map))
+        .alpns(vec![IROH_ALPN.to_vec()])
+        .bind()
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to bind iroh client endpoint: {error}"))
+}
+
 fn set_client_read_timeout(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     timeout: Option<Duration>,
@@ -404,8 +506,8 @@ fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
     Ok(())
 }
 
-fn read_server_message(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+fn read_server_message<S: std::io::Read + std::io::Write>(
+    socket: &mut WebSocket<S>,
 ) -> anyhow::Result<ServerMessage> {
     loop {
         match socket.read()? {

@@ -37,6 +37,10 @@ pub struct DaemonExposureSettings {
     pub port: u16,
     pub allowed_origins: Vec<String>,
     pub token: String,
+    /// Also serve the daemon over iroh P2P and publish a connect ticket.
+    /// The ticket contains the daemon node id and relay info; the wire token
+    /// still authenticates every connection.
+    pub iroh_enabled: bool,
 }
 
 impl Default for DaemonExposureSettings {
@@ -46,6 +50,7 @@ impl Default for DaemonExposureSettings {
             port: DEFAULT_EXPOSED_DAEMON_PORT,
             allowed_origins: vec!["http://localhost:3001".into()],
             token: Self::new_token(),
+            iroh_enabled: false,
         }
     }
 }
@@ -129,6 +134,8 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 pub struct DaemonProcess {
     client: DaemonClient,
     child: Child,
+    /// iroh connect ticket when the daemon was launched with iroh enabled.
+    iroh_ticket: Option<String>,
 }
 
 impl DaemonProcess {
@@ -161,6 +168,9 @@ impl DaemonProcess {
             .arg(std::process::id().to_string());
         if settings.enabled {
             command.arg("--allow-non-loopback");
+        }
+        if settings.iroh_enabled {
+            command.arg("--iroh");
         }
         for origin in &settings.allowed_origins {
             command.arg("--allow-origin").arg(origin);
@@ -232,11 +242,20 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        Ok(Self { client, child })
+        Ok(Self {
+            client,
+            child,
+            iroh_ticket: ready.iroh_ticket,
+        })
     }
 
     pub fn client(&self) -> DaemonClient {
         self.client.clone()
+    }
+
+    /// iroh connect ticket for this daemon, when launched with iroh enabled.
+    pub fn iroh_ticket(&self) -> Option<&str> {
+        self.iroh_ticket.as_deref()
     }
 
     fn has_exited(&mut self) -> bool {
@@ -317,6 +336,11 @@ enum DaemonTarget {
         address: String,
         token: String,
     },
+    RemoteIroh {
+        client: DaemonClient,
+        ticket: String,
+        token: String,
+    },
 }
 
 impl DaemonTarget {
@@ -325,6 +349,7 @@ impl DaemonTarget {
             Self::Local(process) => process.client(),
             Self::Restarting(client) => client.clone(),
             Self::Remote { client, .. } => client.clone(),
+            Self::RemoteIroh { client, .. } => client.clone(),
         }
     }
 }
@@ -391,6 +416,35 @@ impl DaemonSupervisor {
         Ok(supervisor)
     }
 
+    /// Connect to a daemon over iroh P2P using its published ticket.
+    ///
+    /// Like [`Self::connect`], the desktop never owns this daemon: dropping
+    /// the app leaves it running on the remote host.
+    pub fn connect_iroh(ticket: &str) -> anyhow::Result<Self> {
+        let parsed = ticket
+            .parse::<waku_protocol::RemoteTicket>()
+            .map_err(|error| anyhow::anyhow!("invalid Waku remote ticket: {error}"))?;
+        let token = parsed.token.clone();
+        let client = DaemonClient::connect_iroh(&parsed, Vec::new())?;
+        let settings = read_settings(&client)?;
+        let supervisor = Self::from_target(
+            DaemonTarget::RemoteIroh {
+                client,
+                ticket: ticket.to_owned(),
+                token,
+            },
+            None,
+            None,
+            settings,
+        )?;
+        let weak_inner = Arc::downgrade(&supervisor.inner);
+        std::thread::Builder::new()
+            .name("waku-remote-daemon-supervisor".into())
+            .spawn(move || monitor_daemon(weak_inner, None, false))
+            .context("could not start remote Waku daemon supervisor")?;
+        Ok(supervisor)
+    }
+
     fn from_target(
         target: DaemonTarget,
         executable: Option<PathBuf>,
@@ -438,6 +492,19 @@ impl DaemonSupervisor {
 
     pub fn is_remote(&self) -> bool {
         self.inner.executable.is_none()
+            || matches!(
+                &*self.inner.target.lock(),
+                DaemonTarget::Remote { .. } | DaemonTarget::RemoteIroh { .. }
+            )
+    }
+
+    /// iroh connect ticket for the locally supervised daemon, when launched
+    /// with iroh enabled. `None` for remote or non-iroh daemons.
+    pub fn iroh_ticket(&self) -> Option<String> {
+        match &*self.inner.target.lock() {
+            DaemonTarget::Local(process) => process.iroh_ticket().map(str::to_owned),
+            _ => None,
+        }
     }
 
     pub fn settings(&self) -> DaemonSettings {
@@ -482,6 +549,33 @@ impl DaemonSupervisor {
         }
     }
 
+    /// Switch an existing supervisor to a remote iroh daemon without
+    /// rebuilding the supervisor. All clones of this supervisor share the
+    /// same inner target, so live runtime adapters and persisted stores keep
+    /// working and see the replacement client.
+    ///
+    /// The caller should run this off the UI thread.
+    pub fn switch_to_remote(&self, ticket: &str) -> anyhow::Result<()> {
+        let parsed = ticket
+            .parse::<waku_protocol::RemoteTicket>()
+            .map_err(|error| anyhow::anyhow!("invalid Waku remote ticket: {error}"))?;
+        let token = parsed.token.clone();
+        let _restart = self.inner.restart.lock();
+        // The local daemon keeps running; we only stop supervising it.
+        let replacement = DaemonClient::connect_iroh(&parsed, Vec::new())?;
+        *self.inner.target.lock() = DaemonTarget::RemoteIroh {
+            client: replacement.clone(),
+            ticket: ticket.to_owned(),
+            token,
+        };
+        self.inner
+            .client_updates
+            .lock()
+            .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
+        queue_settings_refresh(&self.inner);
+        Ok(())
+    }
+
     /// Queue a daemon settings update without blocking the desktop UI thread.
     pub fn update_settings(&self, settings: DaemonSettings) -> anyhow::Result<()> {
         *self.inner.settings.lock() = settings.clone();
@@ -501,6 +595,12 @@ impl Drop for DaemonSupervisor {
             self.inner.running.store(false, Ordering::Release);
         }
     }
+}
+
+/// How a disconnected remote daemon should be re-dialed.
+enum RemoteReconnect {
+    Address(String, String, DaemonClient),
+    Ticket(String, String, DaemonClient),
 }
 
 fn monitor_daemon(
@@ -523,34 +623,67 @@ fn monitor_daemon(
                     client,
                     address,
                     token,
-                } if client.is_disconnected() => Some((
-                    client.clone(),
-                    address.clone(),
-                    token.clone(),
-                    client.last_sequences(),
-                )),
+                } if client.is_disconnected() => {
+                    Some(RemoteReconnect::Address(address.clone(), token.clone(), client.clone()))
+                }
+                DaemonTarget::RemoteIroh { client, ticket, token }
+                    if client.is_disconnected() =>
+                {
+                    Some(RemoteReconnect::Ticket(ticket.clone(), token.clone(), client.clone()))
+                }
                 _ => None,
             }
         };
-        if let Some((disconnected, address, token, resume_from)) = remote_reconnect {
+        if let Some(reconnect) = remote_reconnect {
             let _restart = inner.restart.lock();
-            let still_current = matches!(
-                &*inner.target.lock(),
-                DaemonTarget::Remote { client, .. }
-                    if client.same_connection(&disconnected) && client.is_disconnected()
-            );
-            if !still_current {
-                continue;
-            }
-            let Ok(replacement) =
-                DaemonClient::connect_with_resume(&address, token.clone(), resume_from)
-            else {
-                continue;
-            };
-            *inner.target.lock() = DaemonTarget::Remote {
-                client: replacement.clone(),
-                address,
-                token,
+            let replacement = match reconnect {
+                RemoteReconnect::Address(address, token, disconnected) => {
+                    let still_current = matches!(
+                        &*inner.target.lock(),
+                        DaemonTarget::Remote { client, .. }
+                            if client.same_connection(&disconnected) && client.is_disconnected()
+                    );
+                    if !still_current {
+                        continue;
+                    }
+                    let resume_from = disconnected.last_sequences();
+                    let Ok(replacement) =
+                        DaemonClient::connect_with_resume(&address, token.clone(), resume_from.clone())
+                    else {
+                        continue;
+                    };
+                    *inner.target.lock() = DaemonTarget::Remote {
+                        client: replacement.clone(),
+                        address,
+                        token,
+                    };
+                    replacement
+                }
+                RemoteReconnect::Ticket(ticket, token, disconnected) => {
+                    let still_current = matches!(
+                        &*inner.target.lock(),
+                        DaemonTarget::RemoteIroh { client, .. }
+                            if client.same_connection(&disconnected) && client.is_disconnected()
+                    );
+                    if !still_current {
+                        continue;
+                    }
+                    let resume_from = disconnected.last_sequences();
+                    let Ok(parsed) = ticket.parse::<waku_protocol::RemoteTicket>() else {
+                        continue;
+                    };
+                    let Ok(replacement) =
+                        DaemonClient::connect_iroh(&parsed, resume_from.clone())
+                    else {
+                        continue;
+                    };
+                    *inner.target.lock() = DaemonTarget::RemoteIroh {
+                        client: replacement.clone(),
+                        ticket,
+                        token,
+                    };
+                    replacement
+                }
             };
             inner
                 .client_updates
@@ -561,7 +694,7 @@ fn monitor_daemon(
         let process_exited = match &mut *inner.target.lock() {
             DaemonTarget::Local(process) => process.has_exited(),
             DaemonTarget::Restarting(_) => true,
-            DaemonTarget::Remote { .. } => continue,
+            DaemonTarget::Remote { .. } | DaemonTarget::RemoteIroh { .. } => continue,
         };
         let Some(executable) = inner.executable.as_ref() else {
             return;
@@ -600,7 +733,7 @@ fn replace_local_daemon(
     let previous = {
         let mut target = inner.target.lock();
         match &*target {
-            DaemonTarget::Remote { .. } => {
+            DaemonTarget::Remote { .. } | DaemonTarget::RemoteIroh { .. } => {
                 bail!("the connected daemon is managed outside Waku Desktop")
             }
             DaemonTarget::Restarting(_) => None,

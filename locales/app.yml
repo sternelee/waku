@@ -141,7 +141,7 @@ settings.skills_keywords:
 settings.usage_keywords:
   en: usage tokens cost spend cache daily chart model breakdown history claude codex
 settings.daemon_keywords:
-  en: daemon server remote web network expose origin token port websocket
+  en: daemon server remote web network expose origin token port websocket iroh p2p ticket connect
 settings.computer_use_keywords:
   en: computer use screen recording accessibility apps control codex
 settings.back:
@@ -206,6 +206,34 @@ daemon.not_configured:
   en: Not configured
 daemon.status:
   en: Status
+daemon.iroh_title:
+  en: Remote access over iroh (P2P)
+daemon.iroh_description:
+  en: Publish a connect ticket so another Waku client can reach this daemon through the iroh network, without opening a port. Changing this restarts only the daemon.
+daemon.iroh_status_enabled:
+  en: Enabled
+daemon.iroh_status_disabled:
+  en: Disabled
+daemon.iroh_ticket:
+  en: Ticket
+daemon.iroh_ticket_unavailable:
+  en: Restart the daemon to generate a ticket
+daemon.iroh_ticket_placeholder:
+  en: Paste a remote ticket
+daemon.iroh_connect_title:
+  en: Connect to a remote daemon
+daemon.iroh_connect_description:
+  en: Paste the ticket published by another machine's daemon. The desktop switches to that daemon; tasks, files, and agents run on the remote host.
+daemon.iroh_connect:
+  en: Connect
+daemon.iroh_connecting:
+  en: Connecting…
+daemon.iroh_connected:
+  en: Connected to remote daemon
+daemon.iroh_connect_failed:
+  en: "Could not connect to remote daemon: {error}"
+daemon.iroh_ticket_missing:
+  en: Paste a remote ticket first
 daemon.disconnect:
   en: Disconnect
 daemon.forget:

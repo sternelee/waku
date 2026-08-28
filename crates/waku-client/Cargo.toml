@@ -9,11 +9,13 @@ license = "GPL-3.0-only"
 anyhow = "1.0"
 crossbeam-channel = "0.5"
 dirs = "6.0"
-parking_lot = "0.12"
+iroh = "1.1.0"
 nucleo-matcher = "0.3"
+parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smol = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "io-util", "time"] }
 tungstenite = { version = "0.30", default-features = false, features = [
     "handshake",
     "rustls-tls-native-roots",

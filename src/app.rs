@@ -1064,6 +1064,9 @@ pub struct Waku {
     settings_search: Entity<TextInput>,
     daemon_port_input: Entity<TextInput>,
     daemon_origins_input: Entity<TextInput>,
+    daemon_iroh_enabled: bool,
+    daemon_iroh_input: Entity<TextInput>,
+    daemon_iroh_connecting: bool,
     daemon_reconfigure_pending: bool,
     daemon_token_revealed: bool,
     settings_focus: FocusHandle,
@@ -2002,6 +2005,11 @@ impl Waku {
             input.set_content(daemon_origins, cx);
             input
         });
+        let daemon_iroh_input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .select_all_on_focus_click()
+                .placeholder(tr!("daemon.iroh_ticket_placeholder"))
+        });
         let skills_search = cx.new(|cx| {
             TextInput::new(window, cx)
                 .clear_on_escape()
@@ -2703,6 +2711,7 @@ impl Waku {
                 })
             };
 
+            let initial_iroh_enabled = state.daemon_exposure.iroh_enabled;
             Self {
                 daemon,
                 daemon_hostname,
@@ -2725,6 +2734,9 @@ impl Waku {
                 settings_search,
                 daemon_port_input,
                 daemon_origins_input,
+                daemon_iroh_enabled: initial_iroh_enabled,
+                daemon_iroh_input,
+                daemon_iroh_connecting: false,
                 daemon_reconfigure_pending: false,
                 daemon_token_revealed: false,
                 settings_focus,

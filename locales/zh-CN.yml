@@ -101,6 +101,20 @@ daemon.web_external_description: Waku Web 连接到由浏览器之外管理的�
 daemon.web_connection_description: 此浏览器不会启动或停止守护进程。
 daemon.not_configured: 未配置
 daemon.status: 状态
+daemon.iroh_title: 通过 iroh（P2P）远程访问
+daemon.iroh_description: 发布连接票据，让另一台设备上的 Waku 客户端通过 iroh 网络访问此守护进程，无需开放端口。更改此项只会重启守护进程。
+daemon.iroh_status_enabled: 已启用
+daemon.iroh_status_disabled: 已禁用
+daemon.iroh_ticket: 票据
+daemon.iroh_ticket_unavailable: 重启守护进程以生成票据
+daemon.iroh_ticket_placeholder: 粘贴远程票据
+daemon.iroh_connect_title: 连接到远程守护进程
+daemon.iroh_connect_description: 粘贴另一台机器上守护进程发布的票据。桌面将切换到该守护进程，任务、文件和智能体将在远程主机上运行。
+daemon.iroh_connect: 连接
+daemon.iroh_connecting: 正在连接…
+daemon.iroh_connected: 已连接到远程守护进程
+daemon.iroh_connect_failed: "无法连接到远程守护进程: {error}"
+daemon.iroh_ticket_missing: 请先粘贴远程票据
 daemon.disconnect: 断开连接
 daemon.forget: 忘记守护进程
 daemon.reconnect: 重新连接

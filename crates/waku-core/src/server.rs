@@ -137,7 +137,7 @@ impl From<&AgentSession> for SessionCatalogEntry {
     }
 }
 
-struct Hub {
+pub struct Hub {
     epoch: Uuid,
     state: Mutex<HubState>,
 }
@@ -162,7 +162,7 @@ struct RuntimeMailbox {
     sender: Sender<DispatchedRequest>,
 }
 
-struct RequestDispatcher {
+pub struct RequestDispatcher {
     backend: Arc<dyn Backend>,
     hub: Arc<Hub>,
     /// A live provider runtime is an actor owned by the daemon, not by any
@@ -458,6 +458,9 @@ impl RequestDispatcher {
     }
 }
 
+/// Serve the daemon's TCP listener and, when supplied, the iroh P2P
+/// transport on the same hub and dispatcher. `iroh` must already be bound;
+/// its accept thread runs until `shutdown` or the transport is dropped.
 pub fn serve(
     listener: TcpListener,
     token: String,
@@ -465,13 +468,70 @@ pub fn serve(
     shutdown: Arc<AtomicBool>,
     options: ServerOptions,
 ) -> anyhow::Result<()> {
+    let hub = Arc::new(Hub::default());
+    let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
+    serve_inner(
+        listener,
+        None,
+        token,
+        backend,
+        shutdown,
+        options,
+        hub,
+        dispatcher,
+    )
+}
+
+/// Serve with a bound iroh endpoint alongside the TCP listener.
+pub fn serve_with_iroh(
+    listener: TcpListener,
+    iroh: Option<crate::remote::IrohEndpoint>,
+    token: String,
+    backend: Arc<dyn Backend>,
+    shutdown: Arc<AtomicBool>,
+    options: ServerOptions,
+) -> anyhow::Result<()> {
+    let hub = Arc::new(Hub::default());
+    let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
+    serve_inner(
+        listener,
+        iroh,
+        token,
+        backend,
+        shutdown,
+        options,
+        hub,
+        dispatcher,
+    )
+}
+
+fn serve_inner(
+    listener: TcpListener,
+    iroh: Option<crate::remote::IrohEndpoint>,
+    token: String,
+    backend: Arc<dyn Backend>,
+    shutdown: Arc<AtomicBool>,
+    options: ServerOptions,
+    hub: Arc<Hub>,
+    dispatcher: Arc<RequestDispatcher>,
+) -> anyhow::Result<()> {
     listener
         .set_nonblocking(true)
         .context("could not configure Waku daemon listener")?;
-    let hub = Arc::new(Hub::default());
-    let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
     let options = Arc::new(options);
     let active_connections = Arc::new(AtomicUsize::new(0));
+    // Start the iroh accept loop now that the hub and dispatcher exist, and
+    // hold the transport alive for the whole loop; dropping it at exit shuts
+    // the endpoint down.
+    let _iroh = iroh.map(|endpoint| {
+        endpoint.serve(
+            token.clone(),
+            dispatcher.clone(),
+            hub.clone(),
+            shutdown.clone(),
+            options.clone(),
+        )
+    });
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -537,6 +597,29 @@ fn handle_connection(
         Some(config),
     )
     .context("WebSocket handshake failed")?;
+    socket.set_config(|config| {
+        config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
+        config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
+    });
+    socket
+        .get_mut()
+        .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
+
+    run_message_loop(socket, expected_token, dispatcher, hub, shutdown, options)
+}
+
+/// Message loop shared by every daemon transport. WebSocket-ready sockets
+/// (TCP) and raw iroh streams both drive a [`WebSocket`] framing layer, so
+/// hello authentication, request dispatch, subscriber fan-out, and shutdown
+/// handling are identical across transports.
+pub(crate) fn run_message_loop<S: std::io::Read + std::io::Write>(
+    mut socket: WebSocket<S>,
+    expected_token: &str,
+    dispatcher: Arc<RequestDispatcher>,
+    hub: Arc<Hub>,
+    shutdown: Arc<AtomicBool>,
+    options: &ServerOptions,
+) -> anyhow::Result<()> {
     let hello = read_client_message(&mut socket)?;
     let resume_from = match hello {
         ClientMessage::Hello {
@@ -578,13 +661,6 @@ fn handle_connection(
             daemon_version: env!("CARGO_PKG_VERSION").into(),
         },
     )?;
-    socket.set_config(|config| {
-        config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
-        config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
-    });
-    socket
-        .get_mut()
-        .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
 
     let (outgoing, outgoing_rx) = unbounded();
     let subscriber_id = hub.subscribe(&resume_from, outgoing.clone());
@@ -946,7 +1022,9 @@ fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
     error.source().is_some_and(retryable_error)
 }
 
-fn read_client_message(socket: &mut WebSocket<TcpStream>) -> anyhow::Result<ClientMessage> {
+fn read_client_message<S: std::io::Read + std::io::Write>(
+    socket: &mut WebSocket<S>,
+) -> anyhow::Result<ClientMessage> {
     loop {
         match socket.read()? {
             Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
@@ -2008,5 +2086,148 @@ mod tests {
             computer_use_enabled: false,
             provider_cursor: None,
         }
+    }
+    #[test]
+    fn iroh_round_trip_sequences_provider_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let backend = Arc::new(TestBackend::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+
+        let (ticket_tx, ticket_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let iroh = crate::remote::IrohEndpoint::bind(
+                iroh::SecretKey::generate(),
+                "iroh-test".into(),
+                "secret".into(),
+            )
+            .expect("bind iroh endpoint");
+            ticket_tx.send(iroh.ticket().clone()).unwrap();
+            serve_with_iroh(
+                listener,
+                Some(iroh),
+                "secret".into(),
+                backend,
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .expect("serve daemon");
+        });
+        let ticket = ticket_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+
+        let client =
+            waku_client::DaemonClient::connect_iroh(&ticket, Vec::new()).expect("connect over iroh");
+        let session_id = Uuid::new_v4();
+        let runtime_id = Uuid::new_v4();
+        let events = client.subscribe(session_id, runtime_id);
+        let response = client
+            .request(
+                session_id,
+                runtime_id,
+                Command::Start {
+                    options: test_start_options(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            response,
+            ResponsePayload::Started {
+                supports_steer: true
+            }
+        ));
+        let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(event.runtime_id, runtime_id);
+        assert_eq!(event.sequence, 1);
+        assert_eq!(event.event.kind, "connected");
+
+        client.shutdown();
+        shutdown.store(true, Ordering::Release);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn supervisor_switch_to_remote_reaches_the_iroh_daemon_in_place() {
+        // Remote iroh daemon.
+        let remote_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote_backend = Arc::new(TestBackend::default());
+        let remote_shutdown = Arc::new(AtomicBool::new(false));
+        let remote_server_shutdown = remote_shutdown.clone();
+        let (ticket_tx, ticket_rx) = std::sync::mpsc::channel();
+        let remote_server = std::thread::spawn(move || {
+            let iroh = crate::remote::IrohEndpoint::bind(
+                iroh::SecretKey::generate(),
+                "switch-test".into(),
+                "secret".into(),
+            )
+            .expect("bind iroh endpoint");
+            ticket_tx.send(iroh.ticket().clone()).unwrap();
+            serve_with_iroh(
+                remote_listener,
+                Some(iroh),
+                "secret".into(),
+                remote_backend,
+                remote_server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .expect("serve remote daemon");
+        });
+        let ticket = ticket_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+
+        // A supervisor already connected to some (local) daemon.
+        let local_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let local_address = local_listener.local_addr().unwrap().to_string();
+        let local_shutdown = Arc::new(AtomicBool::new(false));
+        let local_server_shutdown = local_shutdown.clone();
+        let local_backend = Arc::new(TestBackend::default());
+        let local_server = std::thread::spawn(move || {
+            serve(
+                local_listener,
+                "secret".into(),
+                local_backend,
+                local_server_shutdown,
+                ServerOptions::default(),
+            )
+            .expect("serve local daemon")
+        });
+        let supervisor =
+            DaemonSupervisor::connect(&local_address, "secret".into()).expect("connect local");
+        let clone = supervisor.clone();
+
+        // Switch in place; both handles share the same inner target and the
+        // shared client now reaches the iroh daemon.
+        supervisor
+            .switch_to_remote(ticket.to_string().as_str())
+            .expect("switch to remote");
+        assert!(supervisor.is_remote());
+        assert!(clone.is_remote());
+
+        // The (shared) client can talk to the iroh daemon.
+        let response = supervisor
+            .client()
+            .request(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Command::Start {
+                    options: test_start_options(),
+                },
+            )
+            .expect("remote request");
+        assert!(matches!(
+            response,
+            ResponsePayload::Started {
+                supports_steer: true
+            }
+        ));
+
+        remote_shutdown.store(true, Ordering::Release);
+        local_shutdown.store(true, Ordering::Release);
+        remote_server.join().unwrap();
+        local_server.join().unwrap();
     }
 }

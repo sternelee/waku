@@ -596,6 +596,62 @@ impl Waku {
         let port = self.state.daemon_exposure.port;
         let websocket_url = format!("ws://{}:{port}", self.daemon_hostname);
         let token = self.state.daemon_exposure.token.clone();
+        let apply_remote_ticket = self
+            .daemon
+            .iroh_ticket()
+            .unwrap_or_else(|| tr!("daemon.iroh_ticket_unavailable"));
+        let copy_iroh_ticket_feedback_id = "daemon-iroh-ticket";
+        let iroh_ticket_copied = self.control_was_copied(copy_iroh_ticket_feedback_id);
+        let iroh_ticket_to_copy = apply_remote_ticket.clone();
+        let copy_iroh_ticket_button = div()
+            .id("copy-daemon-iroh-ticket")
+            .tab_index(0)
+            .h(px(27.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(sp(12.5))
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(icon(
+                if iroh_ticket_copied {
+                    "icons/check.svg"
+                } else {
+                    "icons/copy.svg"
+                },
+                11.0,
+                theme.text_tertiary,
+            ))
+            .child(if iroh_ticket_copied {
+                tr!("common.copied")
+            } else {
+                tr!("common.copy")
+            })
+            .on_click({
+                let iroh_ticket_to_copy = iroh_ticket_to_copy.clone();
+                cx.listener(move |this, _, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(iroh_ticket_to_copy.clone()));
+                    this.show_control_copied(copy_iroh_ticket_feedback_id, cx);
+                })
+            })
+            .on_key_down({
+                let iroh_ticket_to_copy = iroh_ticket_to_copy.clone();
+                cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if !event.keystroke.modifiers.modified()
+                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    {
+                        cx.write_to_clipboard(ClipboardItem::new_string(iroh_ticket_to_copy.clone()));
+                        this.show_control_copied(copy_iroh_ticket_feedback_id, cx);
+                        cx.stop_propagation();
+                    }
+                })
+            });
 
         let exposure_toggle = toggle_switch(
             "daemon-exposure-toggle",
@@ -880,6 +936,175 @@ impl Waku {
                     )
                     .child(exposure_toggle),
             )
+            .child(
+                div()
+                    .px(px(20.0))
+                    .py(px(15.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("daemon.iroh_title")),
+                            )
+                            .child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded_full()
+                                    .text_size(sp(12.5))
+                                    .text_color(if self.daemon_iroh_enabled {
+                                        theme.success
+                                    } else {
+                                        theme.text_tertiary
+                                    })
+                                    .bg(theme.overlay)
+                                    .child(if self.daemon_iroh_enabled {
+                                        tr!("daemon.iroh_status_enabled")
+                                    } else {
+                                        tr!("daemon.iroh_status_disabled")
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .ml_auto()
+                                    .child(toggle_switch(
+                                        "daemon-iroh-toggle",
+                                        self.daemon_iroh_enabled,
+                                        pending,
+                                        theme,
+                                        cx,
+                                        move |this, _, cx| {
+                                            this.daemon_iroh_enabled = !this.daemon_iroh_enabled;
+                                            cx.notify();
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_size(sp(12.5))
+                            .line_height(sp(16.0))
+                            .text_color(theme.text_secondary)
+                            .child(tr!("daemon.iroh_description")),
+                    )
+                    .when(self.daemon_iroh_enabled, |card| {
+                        card.child(
+                            div()
+                                .mt(px(13.0))
+                                .py(px(8.0))
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .w(px(36.0))
+                                        .flex_none()
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(tr!("daemon.iroh_ticket")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(".SystemUIFontMonospaced")
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(apply_remote_ticket.clone())),
+                                )
+                                .child(copy_iroh_ticket_button),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .px(px(20.0))
+                    .py(px(15.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .child(
+                        div()
+                            .text_size(sp(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tr!("daemon.iroh_connect_title")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_size(sp(12.5))
+                            .line_height(sp(16.0))
+                            .text_color(theme.text_secondary)
+                            .child(tr!("daemon.iroh_connect_description")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(14.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(TextField::new("daemon-iroh-input", self.daemon_iroh_input.clone()).w_full()),
+                            )
+                            .child(
+                                div()
+                                    .id("connect-iroh-remote")
+                                    .tab_index(0)
+                                    .h(px(29.0))
+                                    .px(px(11.0))
+                                    .rounded(px(7.0))
+                                    .border_1()
+                                    .border_color(theme.border_strong)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_default()
+                                    .text_size(sp(12.5))
+                                    .text_color(theme.text_secondary)
+                                    .opacity(if self.daemon_iroh_connecting { 0.55 } else { 1.0 })
+                                    .focus_visible(|style| style.border_color(theme.accent))
+                                    .when(!self.daemon_iroh_connecting, |element| {
+                                        element
+                                            .hover(|element| element.bg(theme.overlay))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.connect_iroh_remote(cx);
+                                            }))
+                                            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                                if !event.keystroke.modifiers.modified()
+                                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                                {
+                                                    this.connect_iroh_remote(cx);
+                                                    cx.stop_propagation();
+                                                }
+                                            }))
+                                    })
+                                    .child(if self.daemon_iroh_connecting {
+                                        tr!("daemon.iroh_connecting")
+                                    } else {
+                                        tr!("daemon.iroh_connect")
+                                    }),
+                            ),
+                    ),
+            )
             .when(enabled, |column| {
                 column.child(
                     div()
@@ -1115,6 +1340,7 @@ impl Waku {
         let origins = self.daemon_origins_input.read(cx).content().to_owned();
         let mut settings = self.state.daemon_exposure.clone();
         settings.port = port;
+        settings.iroh_enabled = self.daemon_iroh_enabled;
         settings
             .with_allowed_origins_text(&origins)
             .and_then(waku_client::DaemonExposureSettings::validate)
@@ -1126,6 +1352,7 @@ impl Waku {
             .map(|settings| {
                 settings.port != self.state.daemon_exposure.port
                     || settings.allowed_origins != self.state.daemon_exposure.allowed_origins
+                    || settings.iroh_enabled != self.state.daemon_exposure.iroh_enabled
             })
             .unwrap_or(true)
     }
@@ -1164,6 +1391,48 @@ impl Waku {
         self.apply_daemon_exposure(settings, cx);
     }
 
+    /// Dial a remote daemon over iroh from the ticket pasted in the Daemon
+    /// settings page. The existing supervisor's target is swapped in place,
+    /// so every live clone (persisted state, composer drafts, runtime
+    /// adapters) sees the remote daemon; live runtimes are dropped, mirroring
+    /// a managed daemon restart.
+    fn connect_iroh_remote(&mut self, cx: &mut Context<Self>) {
+        let ticket = self
+            .daemon_iroh_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if ticket.is_empty() {
+            self.show_toast(tr!("daemon.iroh_ticket_missing"));
+            return;
+        }
+        self.daemon_iroh_connecting = true;
+        cx.notify();
+
+        let daemon = self.daemon.clone();
+        let connecting = cx
+            .background_executor()
+            .spawn(async move { daemon.switch_to_remote(&ticket) });
+        cx.spawn(async move |this, cx| {
+            let result = connecting.await;
+            let _ = this.update(cx, |this, cx| {
+                this.daemon_iroh_connecting = false;
+                match result {
+                    Ok(()) => {
+                        this.runtimes.clear();
+                        this.show_success_toast(tr!("daemon.iroh_connected"));
+                    }
+                    Err(error) => {
+                        this.show_toast(tr!("daemon.iroh_connect_failed", error = error.to_string()))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn regenerate_daemon_token(&mut self, cx: &mut Context<Self>) {
         let mut settings = match self.daemon_exposure_from_fields(cx) {
             Ok(settings) => settings,
@@ -1199,7 +1468,13 @@ impl Waku {
             return;
         }
 
-        let needs_restart = self.state.daemon_exposure.enabled || settings.enabled;
+        // A listener (exposure) or iroh transport change requires the daemon
+        // to relaunch with the new flags. Purely cosmetic edits (origins,
+        // token) skip the restart path below.
+        let needs_restart = self.state.daemon_exposure.enabled
+            || settings.enabled
+            || self.state.daemon_exposure.iroh_enabled
+            || settings.iroh_enabled;
         if !needs_restart {
             self.state.daemon_exposure = settings;
             self.save();
@@ -1227,6 +1502,7 @@ impl Waku {
                         this.daemon_origins_input.update(cx, |input, cx| {
                             input.set_content(applied.allowed_origins_text(), cx)
                         });
+                        this.daemon_iroh_enabled = applied.iroh_enabled;
                         this.save();
                         this.show_success_toast(tr!("daemon.settings_applied"));
                     }

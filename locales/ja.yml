@@ -105,6 +105,20 @@ daemon.web_external_description: Waku Web はブラウザの外部で管理さ�
 daemon.web_connection_description: このブラウザがデーモンを起動または停止することはありません。
 daemon.not_configured: 未設定
 daemon.status: 状態
+daemon.iroh_title: iroh（P2P）によるリモートアクセス
+daemon.iroh_description: 接続チケットを公開し、別の Waku クライアントがポートを開かずに iroh ネットワーク経由でこのデーモンに到達できるようにします。変更時はデーモンだけが再起動します。
+daemon.iroh_status_enabled: 有効
+daemon.iroh_status_disabled: 無効
+daemon.iroh_ticket: チケット
+daemon.iroh_ticket_unavailable: デーモンを再起動するとチケットが生成されます
+daemon.iroh_ticket_placeholder: リモートチケットを貼り付け
+daemon.iroh_connect_title: リモートデーモンに接続
+daemon.iroh_connect_description: 別のマシンのデーモンが公開したチケットを貼り付けます。デスクトップはそのデーモンに切り替わり、タスク・ファイル・エージェントはリモートホストで実行されます。
+daemon.iroh_connect: 接続
+daemon.iroh_connecting: 接続中…
+daemon.iroh_connected: リモートデーモンに接続しました
+daemon.iroh_connect_failed: "リモートデーモンに接続できません: {error}"
+daemon.iroh_ticket_missing: 先にリモートチケットを貼り付けてください
 daemon.disconnect: 接続を解除
 daemon.forget: デーモンを削除
 daemon.reconnect: 再接続

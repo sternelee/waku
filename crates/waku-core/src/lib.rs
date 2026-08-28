@@ -43,6 +43,7 @@ pub mod opencode_pool;
 pub mod opencode_session;
 pub mod persistence;
 pub mod projectless;
+pub mod remote;
 pub mod settings;
 pub mod skills;
 mod slash_command_catalog;
@@ -63,6 +64,6 @@ pub use protocol::{
     SequencedEvent, ServerMessage, WireComputerToolRequest, WireDriverEvent,
     WireDriverStartOptions, WireSessionOptions,
 };
-pub use server::{Backend, EventSink, ServerOptions, serve};
+pub use server::{Backend, EventSink, ServerOptions, serve, serve_with_iroh};
 pub use settings::{DaemonSettings, DaemonSettingsStore};
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

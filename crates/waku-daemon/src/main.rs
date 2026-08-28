@@ -1,10 +1,12 @@
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow, bail};
+use base64::Engine as _;
 use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
 
 fn main() -> anyhow::Result<()> {
@@ -19,10 +21,21 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("could not bind Waku daemon to {}", arguments.bind))?;
     let address = listener.local_addr()?;
     ensure_bind_allowed(address, arguments.allow_non_loopback)?;
+
+    // Bind the iroh endpoint before printing readiness so the desktop sees a
+    // complete ticket in the same record as the WebSocket address.
+    let iroh = if arguments.iroh {
+        let secret_key = resolve_iroh_secret(arguments.iroh_secret_file.as_deref())?;
+        let label = local_hostname();
+        Some(waku_core::remote::IrohEndpoint::bind(secret_key, label, token.clone())?)
+    } else {
+        None
+    };
     let ready = DaemonReady {
         address: address.to_string(),
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
+        iroh_ticket: iroh.as_ref().map(|endpoint| endpoint.ticket().to_string()),
     };
     println!("{}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
@@ -50,8 +63,9 @@ fn main() -> anyhow::Result<()> {
     )
     .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
-    waku_core::serve(
+    waku_core::serve_with_iroh(
         listener,
+        iroh,
         token,
         Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
         shutdown,
@@ -71,11 +85,46 @@ fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow:
     )
 }
 
+/// Load the daemon's stable iroh identity, generating and persisting one on
+/// first use. A persistent key keeps a previously shared ticket dialable
+/// across daemon restarts.
+fn resolve_iroh_secret(path: Option<&Path>) -> anyhow::Result<iroh::SecretKey> {
+    let path = match path {
+        Some(path) => path.to_owned(),
+        None => waku_core::persistence::StateStore::default_path()
+            .with_file_name("iroh-secret.key"),
+    };
+    if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("could not read iroh secret {}", path.display()))?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(raw.trim())
+            .with_context(|| format!("iroh secret {} is not valid base64", path.display()))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("iroh secret {} is not 32 bytes", path.display()))?;
+        return Ok(iroh::SecretKey::from_bytes(&bytes));
+    }
+    let key = iroh::SecretKey::generate();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.to_bytes());
+    std::fs::write(&path, format!("{encoded}\n"))
+        .with_context(|| format!("could not write iroh secret {}", path.display()))?;
+    Ok(key)
+}
+
+fn local_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "waku-daemon".to_owned())
+}
+
 struct Arguments {
     bind: String,
     parent_pid: Option<u32>,
     allowed_origins: Vec<String>,
     allow_non_loopback: bool,
+    iroh: bool,
+    iroh_secret_file: Option<PathBuf>,
 }
 
 impl Arguments {
@@ -84,6 +133,8 @@ impl Arguments {
         let mut parent_pid = None;
         let mut allowed_origins = Vec::new();
         let mut allow_non_loopback = false;
+        let mut iroh = false;
+        let mut iroh_secret_file = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -111,9 +162,18 @@ impl Arguments {
                 "--allow-non-loopback" => {
                     allow_non_loopback = true;
                 }
+                "--iroh" => {
+                    iroh = true;
+                }
+                "--iroh-secret-file" => {
+                    let path = arguments
+                        .next()
+                        .ok_or_else(|| anyhow!("--iroh-secret-file requires a path"))?;
+                    iroh_secret_file = Some(path.into());
+                }
                 "--help" | "-h" => {
                     println!(
-                        "usage: {} [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]...",
+                        "usage: {} [--bind ADDRESS] [--allow-non-loopback] [--parent-pid PID] [--allow-origin ORIGIN]... [--iroh [--iroh-secret-file PATH]]",
                         env!("CARGO_BIN_NAME")
                     );
                     std::process::exit(0);
@@ -126,6 +186,8 @@ impl Arguments {
             parent_pid,
             allowed_origins,
             allow_non_loopback,
+            iroh,
+            iroh_secret_file,
         })
     }
 }
@@ -200,5 +262,20 @@ mod tests {
     fn parses_explicit_non_loopback_opt_in() {
         let arguments = Arguments::parse(["--allow-non-loopback".into()]).unwrap();
         assert!(arguments.allow_non_loopback);
+    }
+
+    #[test]
+    fn parses_iroh_flags() {
+        let arguments = Arguments::parse([
+            "--iroh".into(),
+            "--iroh-secret-file".into(),
+            "/tmp/waku-test-secret.key".into(),
+        ])
+        .unwrap();
+        assert!(arguments.iroh);
+        assert_eq!(
+            arguments.iroh_secret_file,
+            Some(PathBuf::from("/tmp/waku-test-secret.key"))
+        );
     }
 }

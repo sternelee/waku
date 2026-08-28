@@ -30,6 +30,10 @@ pub struct DaemonReady {
     pub address: String,
     pub protocol_version: u32,
     pub pid: u32,
+    /// Connect ticket for the optional iroh P2P transport. Present only when
+    /// the daemon was launched with `--iroh`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iroh_ticket: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]

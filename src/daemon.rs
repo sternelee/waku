@@ -27,6 +27,15 @@ pub fn start_process() -> anyhow::Result<waku_client::DaemonSupervisor> {
         ),
         (None, None) => {}
     }
+    // A ticket connects the desktop to a daemon on another machine over iroh
+    // P2P. The ticket carries the daemon's wire token, so no separate token
+    // environment variable is needed.
+    let ticket = std::env::var("WAKU_DAEMON_TICKET")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if let Some(ticket) = ticket {
+        return waku_client::DaemonSupervisor::connect_iroh(&ticket);
+    }
     let app_settings = waku_client::persistence::load_or_create_app_settings()
         .context("could not load desktop daemon settings")?;
     waku_client::DaemonSupervisor::spawn_configured(
