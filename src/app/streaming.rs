@@ -241,8 +241,7 @@ impl Waku {
         if self.submission_preparations.contains(&session_id) {
             return false;
         }
-        self.state
-            .session_mut(session_id)
+        self.session_mut_any(session_id)
             .is_some_and(session_accepts_turn_output)
     }
 
@@ -297,8 +296,7 @@ impl Waku {
             }
             DriverEvent::AvailableCommands(names) => {
                 if let Some(session) = self
-                    .state
-                    .session_mut(session_id)
+                    .session_mut_any(session_id)
                     .filter(|session| session.available_commands != names)
                 {
                     session.available_commands = names;
