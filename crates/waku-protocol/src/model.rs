@@ -143,7 +143,8 @@ impl ProviderKind {
     pub fn supports_model_discovery(self) -> bool {
         matches!(
             self,
-            Self::Codex
+            Self::Claude
+                | Self::Codex
                 | Self::Cursor
                 | Self::DeepSeek
                 | Self::Fx
@@ -818,6 +819,38 @@ impl ThreadGoalStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Complete | Self::BudgetLimited)
     }
+}
+
+/// A resumable conversation discovered in a provider CLI's own history.
+///
+/// This is deliberately lightweight: the command palette can list hundreds of
+/// native sessions without moving their transcripts over the daemon protocol.
+/// [`ProviderSessionHistory`] is fetched only after the user chooses one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ProviderSessionSummary {
+    pub cursor: ProviderResumeCursor,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl ProviderSessionSummary {
+    pub fn provider(&self) -> ProviderKind {
+        self.cursor.provider()
+    }
+}
+
+/// The displayable portion of a provider-native conversation imported into a
+/// Waku task. Provider history remains authoritative; unsupported native
+/// items such as private reasoning or provider-only control records are
+/// intentionally absent.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, TS)]
+pub struct ProviderSessionHistory {
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub turns: Vec<AgentTurn>,
 }
 
 /// A provider-persisted objective the agent keeps pursuing across turns.
@@ -3972,7 +4005,7 @@ mod tests {
     #[test]
     fn only_dynamic_provider_catalogs_are_discovered() {
         assert!(!ProviderKind::Amp.supports_model_discovery());
-        assert!(!ProviderKind::Claude.supports_model_discovery());
+        assert!(ProviderKind::Claude.supports_model_discovery());
         assert!(ProviderKind::Codex.supports_model_discovery());
         assert!(ProviderKind::Cursor.supports_model_discovery());
         assert!(ProviderKind::DeepSeek.supports_model_discovery());

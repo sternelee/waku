@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::attachments::{AttachmentUpload, StoredAttachment};
 use crate::computer_use::ComputerPermissions;
 use crate::model::{
-    AgentSession, GoalOperation, Project, ProviderKind, ProviderProbe, UserInputAnswer,
+    AgentSession, GoalOperation, Project, ProviderKind, ProviderProbe, ProviderResumeCursor,
+    ProviderSessionHistory, ProviderSessionSummary, UserInputAnswer,
 };
 use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
 use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
@@ -18,7 +19,7 @@ use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -180,6 +181,16 @@ pub enum Command {
     SearchSessionMessages {
         query: String,
         limit: usize,
+    },
+    /// List one provider's resumable CLI conversations on the daemon host.
+    ListProviderSessions {
+        provider: ProviderKind,
+        limit: usize,
+    },
+    /// Load the user-visible transcript for one provider-native conversation.
+    LoadProviderSession {
+        cursor: ProviderResumeCursor,
+        cwd: PathBuf,
     },
     LoadComposerDrafts,
     SaveComposerDrafts {
@@ -409,6 +420,12 @@ pub enum ResponsePayload {
     SessionMessageMatches {
         matches: Vec<SessionMessageMatch>,
     },
+    ProviderSessions {
+        sessions: Vec<ProviderSessionSummary>,
+    },
+    ProviderSessionHistory {
+        history: ProviderSessionHistory,
+    },
     ComposerDrafts {
         drafts: ComposerDrafts,
     },
@@ -511,7 +528,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 
     #[test]
@@ -520,7 +537,34 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 6);
+    }
+
+    #[test]
+    fn provider_session_commands_use_stable_wire_fields() {
+        let list = serde_json::to_value(Command::ListProviderSessions {
+            provider: ProviderKind::Codex,
+            limit: 250,
+        })
+        .unwrap();
+        assert_eq!(list["type"], "listProviderSessions");
+        assert_eq!(list["provider"], "codex");
+        assert_eq!(list["limit"], 250);
+
+        let load = serde_json::to_value(Command::LoadProviderSession {
+            cursor: ProviderResumeCursor::Codex {
+                thread_id: "01900000-0000-7000-8000-000000000001".into(),
+            },
+            cwd: PathBuf::from("/tmp/project"),
+        })
+        .unwrap();
+        assert_eq!(load["type"], "loadProviderSession");
+        assert_eq!(load["cursor"]["provider"], "codex");
+        assert_eq!(
+            load["cursor"]["threadId"],
+            "01900000-0000-7000-8000-000000000001"
+        );
+        assert_eq!(load["cwd"], "/tmp/project");
     }
 
     #[test]

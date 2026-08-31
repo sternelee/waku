@@ -34,9 +34,9 @@ use crate::model::{
     BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
     ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
     MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
-    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
-    SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
-    compact_path, unix_time, unix_time_millis,
+    ProviderResumeCursor, ProviderSessionHistory, ProviderSessionSummary, QueuedMessage,
+    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock, TurnStatus,
+    UserInputAnswer, UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -68,8 +68,8 @@ use crate::ui::{
 use crate::{
     CancelTaskSwitch, CancelTurn, CloseFind, CloseWindow, ConfirmTaskSwitch, CopySelection,
     FindNext, FindPrevious, FocusComposer, NavigateBack, NavigateForward, NewProject, NewSession,
-    OpenFind, OpenFindReplace, OpenSettings, ReplaceAllMatches, SaveFile, SelectFirstTask,
-    SelectLastTask, SwitchTaskBackward, SwitchTaskForward, ToggleCommandPalette,
+    OpenFind, OpenFindReplace, OpenResumePicker, OpenSettings, ReplaceAllMatches, SaveFile,
+    SelectFirstTask, SelectLastTask, SwitchTaskBackward, SwitchTaskForward, ToggleCommandPalette,
     ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord, ToggleFpsCounter,
     ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
@@ -1786,6 +1786,13 @@ impl Waku {
                 self.updater_status = crate::updater::UpdateStatus::Idle;
                 self.reset_updater_button_animation();
                 self.show_toast(tr!("updater.failed", error = error));
+            }
+            #[cfg(target_os = "linux")]
+            crate::updater::UpdaterEvent::QuitAndInstall => {
+                // The helper has already validated both prefixes and now
+                // waits for GPUI's normal asynchronous quit hooks to finish
+                // saving drafts and window state before it swaps them.
+                cx.quit();
             }
         }
         cx.notify();
