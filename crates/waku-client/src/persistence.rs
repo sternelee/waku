@@ -257,6 +257,11 @@ pub struct AppSettings {
     /// catalog id. `None` — and an id no longer installed — fall back to the
     /// platform file manager.
     pub open_in_app: Option<String>,
+    /// The iroh connect ticket of the remote daemon this desktop last
+    /// connected to. Persisted so the app re-attaches after a relaunch and
+    /// re-syncs the shared remote sessions into the sidebar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ticket: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -270,6 +275,7 @@ impl Default for AppSettings {
             code_font_size: DEFAULT_CODE_FONT_SIZE,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
+            remote_ticket: None,
         }
     }
 }
@@ -375,6 +381,8 @@ pub struct PersistedState {
     pub daemon_exposure: DaemonExposureSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_in_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ticket: Option<String>,
     #[serde(default = "default_sidebar_visibility")]
     pub sidebar_visible: bool,
     #[serde(default = "default_right_panel_visibility")]
@@ -446,6 +454,7 @@ impl PersistedState {
             code_font_size: DEFAULT_CODE_FONT_SIZE,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
+            remote_ticket: None,
             sidebar_visible: true,
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
@@ -569,6 +578,7 @@ impl PersistedState {
             code_font_size: self.code_font_size,
             daemon_exposure: self.daemon_exposure.clone(),
             open_in_app: self.open_in_app.clone(),
+            remote_ticket: self.remote_ticket.clone(),
         }
     }
 
@@ -605,6 +615,7 @@ impl PersistedState {
         self.code_font_size = sanitized_code_font_size(settings.code_font_size);
         self.daemon_exposure = settings.daemon_exposure;
         self.open_in_app = settings.open_in_app;
+        self.remote_ticket = settings.remote_ticket;
     }
 
     fn apply_app_state(&mut self, app_state: AppState) {

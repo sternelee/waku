@@ -42,6 +42,10 @@ export const sessions = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
     /** Completion of the most recent assistant turn, unix seconds. */
     lastReplyAt: integer("last_reply_at"),
+    /** Whether remote iroh P2P clients may see and continue this session. */
+    remoteSyncEnabled: integer("remote_sync_enabled", {
+      mode: "boolean",
+    }).notNull().default(false),
   },
   (table) => [
     index("sessions_by_project").on(table.projectId, table.updatedAt),

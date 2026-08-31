@@ -921,6 +921,11 @@ pub struct AgentSession {
     pub runtime_mode: RuntimeMode,
     #[serde(default)]
     pub interaction_mode: InteractionMode,
+    /// Whether remote Waku clients connected over iroh P2P may see this
+    /// session, attach to its runtime, and continue it. Sessions default to
+    /// local-only; the owning desktop flips this per session.
+    #[serde(default)]
+    pub remote_sync_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1004,6 +1009,7 @@ impl AgentSession {
             model: None,
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Build,
+            remote_sync_enabled: false,
             reasoning_effort: None,
             service_tier: None,
             context_window: None,
@@ -1042,6 +1048,7 @@ impl AgentSession {
             model: self.model.clone(),
             runtime_mode: RuntimeMode::default(),
             interaction_mode: InteractionMode::default(),
+            remote_sync_enabled: self.remote_sync_enabled,
             reasoning_effort: None,
             service_tier: None,
             context_window: None,

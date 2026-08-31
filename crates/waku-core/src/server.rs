@@ -24,6 +24,16 @@ use crate::protocol::{
     ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
+/// How a client is connected. A desktop on the daemon host (and any browser
+/// client the owner whitelisted) sees every session; a peer that dialed in
+/// over iroh P2P may only see, attach to, and continue sessions the owning
+/// desktop explicitly shared with `remote_sync_enabled`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PeerScope {
+    Local,
+    RemoteIroh,
+}
+
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
@@ -84,13 +94,28 @@ impl EventSink {
 struct HubState {
     next_subscriber_id: u64,
     task_state_revision: u64,
-    subscribers: HashMap<u64, Sender<ServerMessage>>,
+    subscribers: HashMap<u64, (Sender<ServerMessage>, PeerScope)>,
     active_runtimes: HashMap<Uuid, Uuid>,
     next_sequences: HashMap<(Uuid, Uuid), u64>,
     journal: HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>,
     responses: VecDeque<(Uuid, ResponseOutcome)>,
     catalog_projects: HashMap<Uuid, ProjectCatalogEntry>,
     catalog_sessions: HashMap<Uuid, SessionCatalogEntry>,
+}
+
+impl HubState {
+    /// Whether `scope` may currently see and operate `session_id`. Local
+    /// clients always may; remote iroh peers only when the owning desktop
+    /// shared the session.
+    fn allows_session(&self, scope: PeerScope, session_id: Uuid) -> bool {
+        match scope {
+            PeerScope::Local => true,
+            PeerScope::RemoteIroh => self
+                .catalog_sessions
+                .get(&session_id)
+                .is_some_and(|entry| entry.remote_sync_enabled),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,6 +145,7 @@ struct SessionCatalogEntry {
     status: SessionStatus,
     created_at: u64,
     last_reply_at: Option<u64>,
+    remote_sync_enabled: bool,
 }
 
 impl From<&AgentSession> for SessionCatalogEntry {
@@ -133,6 +159,7 @@ impl From<&AgentSession> for SessionCatalogEntry {
             status: session.status,
             created_at: session.created_at,
             last_reply_at: session.last_reply_at,
+            remote_sync_enabled: session.remote_sync_enabled,
         }
     }
 }
@@ -233,14 +260,28 @@ impl Hub {
             }
         }
         let message = ServerMessage::Event(event);
+        // Precompute once: remote subscribers keep receiving only sessions the
+        // owner shared; local subscribers always do.
+        let remote_allowed = state.allows_session(PeerScope::RemoteIroh, session_id);
         state
             .subscribers
-            .retain(|_, subscriber| subscriber.send(message.clone()).is_ok());
+            .retain(|_, (subscriber, scope)| {
+                (*scope == PeerScope::Local || remote_allowed)
+                    && subscriber.send(message.clone()).is_ok()
+            });
     }
 
-    fn subscribe(&self, resume_from: &[ReplayCursor], sender: Sender<ServerMessage>) -> u64 {
+    fn subscribe(
+        &self,
+        resume_from: &[ReplayCursor],
+        scope: PeerScope,
+        sender: Sender<ServerMessage>,
+    ) -> u64 {
         let mut state = self.state.lock();
         for (&(session_id, runtime_id), events) in &state.journal {
+            if !state.allows_session(scope, session_id) {
+                continue;
+            }
             let sequence = resume_from
                 .iter()
                 .find(|cursor| {
@@ -256,7 +297,7 @@ impl Hub {
         }
         let id = state.next_subscriber_id;
         state.next_subscriber_id = state.next_subscriber_id.saturating_add(1);
-        state.subscribers.insert(id, sender);
+        state.subscribers.insert(id, (sender, scope));
         id
     }
 
@@ -313,9 +354,19 @@ impl Hub {
         let message = ServerMessage::TaskStateChanged {
             revision: state.task_state_revision,
         };
-        state.subscribers.retain(|subscriber_id, subscriber| {
+        state.subscribers.retain(|subscriber_id, (subscriber, _)| {
             *subscriber_id == source_subscriber_id || subscriber.send(message.clone()).is_ok()
         });
+    }
+
+    /// Whether a session is currently shared with remote iroh peers. Used to
+    /// gate requests and to filter task-state payloads per remote connection.
+    fn session_is_remote_shared(&self, session_id: Uuid) -> bool {
+        let state = self.state.lock();
+        state
+            .catalog_sessions
+            .get(&session_id)
+            .is_some_and(|entry| entry.remote_sync_enabled)
     }
 
     fn cached_response(&self, request_id: Uuid) -> Option<ResponseOutcome> {
@@ -605,7 +656,15 @@ fn handle_connection(
         .get_mut()
         .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
 
-    run_message_loop(socket, expected_token, dispatcher, hub, shutdown, options)
+    run_message_loop(
+        socket,
+        expected_token,
+        PeerScope::Local,
+        dispatcher,
+        hub,
+        shutdown,
+        options,
+    )
 }
 
 /// Message loop shared by every daemon transport. WebSocket-ready sockets
@@ -615,6 +674,7 @@ fn handle_connection(
 pub(crate) fn run_message_loop<S: std::io::Read + std::io::Write>(
     mut socket: WebSocket<S>,
     expected_token: &str,
+    scope: PeerScope,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
     shutdown: Arc<AtomicBool>,
@@ -663,17 +723,27 @@ pub(crate) fn run_message_loop<S: std::io::Read + std::io::Write>(
     )?;
 
     let (outgoing, outgoing_rx) = unbounded();
-    let subscriber_id = hub.subscribe(&resume_from, outgoing.clone());
+    let subscriber_id = hub.subscribe(&resume_from, scope, outgoing.clone());
 
     'connection: while !shutdown.load(Ordering::Acquire) {
-        while let Ok(message) = outgoing_rx.try_recv() {
+        while let Ok(mut message) = outgoing_rx.try_recv() {
+            if scope == PeerScope::RemoteIroh {
+                filter_task_state_for_remote(&mut message, &hub);
+            }
             if write_json(&mut socket, &message).is_err() {
                 break 'connection;
             }
         }
         match socket.read() {
             Ok(Message::Text(text)) => match serde_json::from_str(text.as_ref()) {
-                Ok(ClientMessage::Request(request)) => {
+                Ok(ClientMessage::Request(mut request)) => {
+                    if scope == PeerScope::RemoteIroh
+                        && let Some(rejection) = remote_peer_rejection(&hub, &mut request)
+                    {
+                        let request_id = request.request_id;
+                        send_dispatch_error(request_id, outgoing.clone(), &hub, rejection);
+                        continue;
+                    }
                     dispatcher.dispatch(request, outgoing.clone(), subscriber_id);
                 }
                 Ok(ClientMessage::Shutdown) => {
@@ -743,6 +813,59 @@ fn handshake_error(status: StatusCode, message: &str) -> ErrorResponse {
 
 fn token_matches(expected: &str, candidate: &str) -> bool {
     expected.as_bytes().ct_eq(candidate.as_bytes()).into()
+}
+
+const REMOTE_SESSION_DENIED: &str = "this session is not shared with remote clients";
+
+/// For a remote iroh peer, reject requests that reach beyond the sessions the
+/// owning desktop shared, or narrow a request whose payload carries session
+/// data the peer must not write. `None` means the request may proceed.
+fn remote_peer_rejection(hub: &Arc<Hub>, request: &mut Request) -> Option<String> {
+    match &mut request.command {
+        // The owner's full catalog stays local; a remote peer only ever
+        // receives the shared subset (filtered again at the write path).
+        Command::LoadTaskState => None,
+        // Merge-only upserts: drop every session the owner did not share, so
+        // a remote continuation can never overwrite a local-only session. A
+        // brand-new session id also lands outside the shared set, which keeps
+        // remote peers from creating tasks on this machine.
+        Command::SaveTaskState { sessions, .. } => {
+            sessions.retain(|session| hub.session_is_remote_shared(session.id));
+            None
+        }
+        // Sessions hydrate only when shared.
+        Command::HydrateSession { session_id }
+            if !hub.session_is_remote_shared(*session_id) =>
+        {
+            Some(REMOTE_SESSION_DENIED.into())
+        }
+        // Everything else is scoped by its session id; the nil id is
+        // daemon-global (settings, probes) and stays open so the remote
+        // client can operate normally.
+        _ if request.session_id != Uuid::nil()
+            && !hub.session_is_remote_shared(request.session_id) =>
+        {
+            Some(REMOTE_SESSION_DENIED.into())
+        }
+        _ => None,
+    }
+}
+
+/// A remote peer only ever sees the shared subset of the task catalog. The
+/// response travels through this connection's outgoing queue, so it is
+/// filtered here; live events and journal replays are already gated inside
+/// the hub.
+fn filter_task_state_for_remote(message: &mut ServerMessage, hub: &Arc<Hub>) {
+    let ServerMessage::Response { outcome, .. } = message else {
+        return;
+    };
+    let ResponseOutcome::Ok { payload } = outcome else {
+        return;
+    };
+    let ResponsePayload::TaskState { sessions, .. } = payload else {
+        return;
+    };
+    sessions.retain(|session| hub.session_is_remote_shared(session.id));
 }
 
 fn command_targets_runtime(command: &Command) -> bool {
@@ -1066,6 +1189,7 @@ mod tests {
     #[derive(Default)]
     struct TestBackend {
         runtimes: Mutex<HashMap<Uuid, Uuid>>,
+        sessions: Mutex<Vec<AgentSession>>,
     }
 
     impl Backend for TestBackend {
@@ -1095,9 +1219,50 @@ mod tests {
                     self.runtimes.lock().remove(&session_id);
                     Ok(ResponsePayload::Ack)
                 }
+                Command::SaveTaskState { sessions, .. } => {
+                    let mut stored = self.sessions.lock();
+                    for session in sessions {
+                        if let Some(existing) =
+                            stored.iter_mut().find(|existing| existing.id == session.id)
+                        {
+                            *existing = session;
+                        } else {
+                            stored.push(session);
+                        }
+                    }
+                    Ok(ResponsePayload::TaskStateSaved {
+                        sessions: stored.clone(),
+                    })
+                }
+                Command::LoadTaskState => Ok(ResponsePayload::TaskState {
+                    projects: Vec::new(),
+                    sessions: self.sessions.lock().clone(),
+                    default_cwd: PathBuf::from("/tmp"),
+                    projectless_root: Some(PathBuf::from("/tmp/.waku/projects")),
+                }),
                 _ => Ok(ResponsePayload::Ack),
             }
         }
+    }
+
+    /// Populate the daemon catalog from a local (websocket) client: the owner
+    /// side marking which sessions are shared with remote iroh peers.
+    fn share_session(client: &waku_client::DaemonClient, session_id: Uuid) {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        session.id = session_id;
+        session.remote_sync_enabled = true;
+        let response = client
+            .request(
+                Uuid::nil(),
+                Uuid::nil(),
+                Command::SaveTaskState {
+                    projects: Vec::new(),
+                    live_session_ids: vec![session_id],
+                    sessions: vec![session],
+                },
+            )
+            .unwrap();
+        assert!(matches!(response, ResponsePayload::TaskStateSaved { .. }));
     }
 
     #[derive(Default)]
@@ -1138,9 +1303,9 @@ mod tests {
     fn task_state_revisions_notify_other_clients_only() {
         let hub = Hub::default();
         let (source_tx, source_rx) = unbounded();
-        let source_id = hub.subscribe(&[], source_tx);
+        let source_id = hub.subscribe(&[], PeerScope::Local, source_tx);
         let (observer_tx, observer_rx) = unbounded();
-        hub.subscribe(&[], observer_tx);
+        hub.subscribe(&[], PeerScope::Local, observer_tx);
 
         hub.task_state_changed(source_id);
 
@@ -1784,7 +1949,7 @@ mod tests {
         let old_runtime_id = Uuid::new_v4();
         let new_runtime_id = Uuid::new_v4();
         let (outgoing, events) = unbounded();
-        hub.subscribe(&[], outgoing);
+        hub.subscribe(&[], PeerScope::Local, outgoing);
 
         hub.begin_runtime(session_id, old_runtime_id);
         let old_sink = hub.event_sink(session_id, old_runtime_id);
@@ -1831,6 +1996,7 @@ mod tests {
                 epoch: Uuid::nil(),
                 sequence: u64::MAX,
             }],
+            PeerScope::Local,
             outgoing,
         );
 
@@ -2093,6 +2259,7 @@ mod tests {
     #[test]
     fn iroh_round_trip_sequences_provider_events() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
         let backend = Arc::new(TestBackend::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let server_shutdown = shutdown.clone();
@@ -2121,9 +2288,14 @@ mod tests {
         });
         let ticket = ticket_rx.recv_timeout(Duration::from_secs(30)).unwrap();
 
+        // The owner marks the session as shared before the iroh peer can touch it.
+        let owner_client =
+            waku_client::DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+        let session_id = Uuid::new_v4();
+        share_session(&owner_client, session_id);
+
         let client =
             waku_client::DaemonClient::connect_iroh(&ticket, Vec::new()).expect("connect over iroh");
-        let session_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();
         let events = client.subscribe(session_id, runtime_id);
         let response = client
@@ -2153,8 +2325,10 @@ mod tests {
 
     #[test]
     fn supervisor_switch_to_remote_reaches_the_iroh_daemon_in_place() {
-        // Remote iroh daemon.
+        // Remote iroh daemon (also listening on TCP so the owner side can
+        // mark sessions as shared before the remote client dials in).
         let remote_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let remote_address = remote_listener.local_addr().unwrap();
         let remote_backend = Arc::new(TestBackend::default());
         let remote_shutdown = Arc::new(AtomicBool::new(false));
         let remote_server_shutdown = remote_shutdown.clone();
@@ -2181,6 +2355,13 @@ mod tests {
             .expect("serve remote daemon");
         });
         let ticket = ticket_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        // The owner side of the remote daemon shares a session the switched
+        // supervisor will target.
+        let owner_client =
+            waku_client::DaemonClient::connect(&remote_address.to_string(), "secret".into())
+                .unwrap();
+        let session_id = Uuid::new_v4();
+        share_session(&owner_client, session_id);
 
         // A supervisor already connected to some (local) daemon.
         let local_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2214,7 +2395,7 @@ mod tests {
         let response = supervisor
             .client()
             .request(
-                Uuid::new_v4(),
+                session_id,
                 Uuid::new_v4(),
                 Command::Start {
                     options: test_start_options(),
@@ -2232,5 +2413,112 @@ mod tests {
         local_shutdown.store(true, Ordering::Release);
         remote_server.join().unwrap();
         local_server.join().unwrap();
+    }
+
+    #[test]
+    fn remote_peer_only_sees_and_reaches_shared_sessions() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let backend = Arc::new(TestBackend::default());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+
+        let (ticket_tx, ticket_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let iroh = crate::remote::IrohEndpoint::bind(
+                iroh::SecretKey::generate(),
+                "gate-test".into(),
+                "secret".into(),
+            )
+            .expect("bind iroh endpoint");
+            ticket_tx.send(iroh.ticket().clone()).unwrap();
+            serve_with_iroh(
+                listener,
+                Some(iroh),
+                "secret".into(),
+                backend,
+                server_shutdown,
+                ServerOptions {
+                    allow_shutdown: true,
+                    ..ServerOptions::default()
+                },
+            )
+            .expect("serve daemon");
+        });
+        let ticket = ticket_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+
+        // Local owner stores two sessions: one shared, one local-only.
+        let owner = waku_client::DaemonClient::connect(&address.to_string(), "secret".into())
+            .unwrap();
+        let shared_id = Uuid::new_v4();
+        let local_only_id = Uuid::new_v4();
+        share_session(&owner, shared_id);
+        let mut local_only = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        local_only.id = local_only_id;
+        assert!(matches!(
+            owner
+                .request(
+                    Uuid::nil(),
+                    Uuid::nil(),
+                    Command::SaveTaskState {
+                        projects: Vec::new(),
+                        live_session_ids: vec![local_only_id],
+                        sessions: vec![local_only],
+                    },
+                )
+                .unwrap(),
+            ResponsePayload::TaskStateSaved { .. }
+        ));
+
+        // The remote peer's catalog only ever contains the shared session.
+        let remote = waku_client::DaemonClient::connect_iroh(&ticket, Vec::new()).unwrap();
+        let ResponsePayload::TaskState { sessions, .. } = remote
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .unwrap()
+        else {
+            panic!("expected a task-state response")
+        };
+        let ids: Vec<_> = sessions.iter().map(|session| session.id).collect();
+        assert_eq!(ids, vec![shared_id]);
+
+        // The shared session is reachable and streamable.
+        let runtime_id = Uuid::new_v4();
+        let events = remote.subscribe(shared_id, runtime_id);
+        assert!(matches!(
+            remote
+                .request(
+                    shared_id,
+                    runtime_id,
+                    Command::Start {
+                        options: test_start_options(),
+                    },
+                )
+                .unwrap(),
+            ResponsePayload::Started {
+                supports_steer: true
+            }
+        ));
+        assert!(events.recv_timeout(Duration::from_secs(5)).is_ok());
+
+        // The local-only session is rejected, and so is hydrating it.
+        let denied_start = remote.request(
+            local_only_id,
+            Uuid::new_v4(),
+            Command::Start {
+                options: test_start_options(),
+            },
+        );
+        assert!(denied_start.is_err());
+        let denied_hydrate = remote.request(
+            Uuid::nil(),
+            Uuid::nil(),
+            Command::HydrateSession {
+                session_id: local_only_id,
+            },
+        );
+        assert!(denied_hydrate.is_err());
+
+        shutdown.store(true, Ordering::Release);
+        server.join().unwrap();
     }
 }

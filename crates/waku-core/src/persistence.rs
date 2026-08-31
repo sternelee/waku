@@ -1103,7 +1103,7 @@ impl StateStore {
         let mut sessions = connection
             .prepare(
                 "SELECT id, project_id, title, auto_title, provider, model, status,
-                        created_at, updated_at, last_reply_at
+                        created_at, updated_at, last_reply_at, remote_sync_enabled
                  FROM sessions ORDER BY updated_at",
             )
             .map_err(to_io_error)?;
@@ -1121,6 +1121,7 @@ impl StateStore {
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, bool>(10)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -1467,6 +1468,7 @@ type SessionColumns = (
     i64,
     i64,
     Option<i64>,
+    bool,
 );
 
 /// Builds a list-only session from its columns. `messages`,
@@ -1486,6 +1488,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         created_at,
         updated_at,
         last_reply_at,
+        remote_sync_enabled,
     ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
@@ -1498,6 +1501,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         // Hydration replaces these; the list never reads them.
         runtime_mode: RuntimeMode::default(),
         interaction_mode: InteractionMode::default(),
+        remote_sync_enabled,
         reasoning_effort: None,
         service_tier: None,
         context_window: None,
@@ -1714,18 +1718,19 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
          id, project_id, title, auto_title, provider, model, status,
-         created_at, updated_at, last_reply_at
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         created_at, updated_at, last_reply_at, remote_sync_enabled
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
      ON CONFLICT(id) DO UPDATE SET
-         project_id    = excluded.project_id,
-         title         = excluded.title,
-         auto_title    = excluded.auto_title,
-         provider      = excluded.provider,
-         model         = excluded.model,
-         status        = excluded.status,
-         created_at    = excluded.created_at,
-         updated_at    = excluded.updated_at,
-         last_reply_at = excluded.last_reply_at";
+         project_id         = excluded.project_id,
+         title              = excluded.title,
+         auto_title         = excluded.auto_title,
+         provider           = excluded.provider,
+         model              = excluded.model,
+         status             = excluded.status,
+         created_at         = excluded.created_at,
+         updated_at         = excluded.updated_at,
+         last_reply_at      = excluded.last_reply_at,
+         remote_sync_enabled = excluded.remote_sync_enabled";
 
 const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
      VALUES(?1, ?2, ?3, ?4, ?5)
@@ -1764,6 +1769,7 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         session
             .last_reply_at
             .map_or(Value::Null, |at| Value::Integer(at as i64)),
+        Value::Integer(session.remote_sync_enabled as i64),
     ]
 }
 

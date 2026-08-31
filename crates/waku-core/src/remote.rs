@@ -212,6 +212,7 @@ async fn accept_loop(
             if let Err(error) = crate::server::run_message_loop(
                 socket,
                 &token,
+                crate::server::PeerScope::RemoteIroh,
                 dispatcher,
                 hub,
                 daemon_shutdown,

@@ -69,6 +69,7 @@ pub(super) enum SidebarGroup {
     Updated(SessionDateGroup),
     Project(Uuid),
     Projectless,
+    Remote,
 }
 
 impl SidebarGroup {
@@ -77,6 +78,7 @@ impl SidebarGroup {
             Self::Updated(group) => format!("updated-{}", group.index()).into(),
             Self::Project(project_id) => format!("project-{project_id}").into(),
             Self::Projectless => "projectless".into(),
+            Self::Remote => "remote".into(),
         }
     }
 
@@ -85,6 +87,7 @@ impl SidebarGroup {
             Self::Updated(group) => mix(fingerprint, group.index() as u64 + 1),
             Self::Project(project_id) => mix_uuid(mix(fingerprint, 0x100), project_id),
             Self::Projectless => mix(fingerprint, 0x200),
+            Self::Remote => mix(fingerprint, 0x300),
         }
     }
 }
@@ -1189,6 +1192,16 @@ impl Waku {
                 );
             }
         }
+        // Remote sessions and the remote connection's presence both change the
+        // sidebar, so fold them into the fingerprint alongside local sessions.
+        fingerprint = mix(fingerprint, u64::from(self.remote_daemon.is_some()));
+        for session in &self.remote_sessions {
+            if !session.has_started() {
+                continue;
+            }
+            fingerprint = mix_uuid(fingerprint, session.id);
+            fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
+        }
         if self.state.sidebar_grouping == SidebarGrouping::Project {
             for project in &self.state.projects {
                 fingerprint = mix_uuid(fingerprint, project.id);
@@ -1235,6 +1248,27 @@ impl Waku {
         sort_sidebar_sessions(&mut sorted_sessions, self.state.sidebar_ordering);
 
         let mut rows = vec![SidebarRow::Search];
+        // Remote sessions come first: they belong to another machine's daemon
+        // and read as a distinct, collapsible group at the top.
+        if self.remote_daemon.is_some() && !self.remote_sessions.is_empty() {
+            let mut remote_sessions = self
+                .remote_sessions
+                .iter()
+                .filter(|session| session.has_started())
+                .collect::<Vec<_>>();
+            remote_sessions.sort_by_key(|session| sidebar_session_timestamp(session));
+            let remote_ids = remote_sessions
+                .into_iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>();
+            append_sidebar_group_rows(
+                &mut rows,
+                SidebarGroup::Remote,
+                &remote_ids,
+                self.sidebar_collapsed_groups.contains(&SidebarGroup::Remote),
+                false,
+            );
+        }
         match self.state.sidebar_grouping {
             SidebarGrouping::Updated => {
                 let mut grouped_sessions: [Vec<Uuid>; 6] = std::array::from_fn(|_| Vec::new());
@@ -1404,6 +1438,7 @@ impl Waku {
             .clone();
         let show_folder_icon =
             matches!(group, SidebarGroup::Project(_) | SidebarGroup::Projectless);
+        let remote_group = matches!(group, SidebarGroup::Remote);
         let folder_icon = if collapsed {
             "icons/folder.svg"
         } else {
@@ -1419,6 +1454,7 @@ impl Waku {
                 .map(Project::display_name)
                 .unwrap_or_else(|| tr!("project.no_project_name")),
             SidebarGroup::Projectless => tr!("project.no_project_name"),
+            SidebarGroup::Remote => tr!("sidebar.remote_group"),
         };
         let updated_chevron = matches!(group, SidebarGroup::Updated(_)).then(|| {
             icon("icons/chevron-down.svg", 14.0, theme.text_secondary)
@@ -1428,7 +1464,7 @@ impl Waku {
                 .invisible()
                 .group_hover(group_name.clone(), |icon| icon.visible())
         });
-        let compose = show_folder_icon.then(|| {
+        let compose = (show_folder_icon && !remote_group).then(|| {
             let compose_focus = self
                 .sidebar_group_compose_focuses
                 .borrow_mut()
@@ -1509,8 +1545,12 @@ impl Waku {
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .when(show_folder_icon, |element| {
-                        element.child(icon(folder_icon, 14.0, theme.text_secondary))
+                    .when(show_folder_icon || remote_group, |element| {
+                        element.child(icon(
+                            if remote_group { "icons/globe.svg" } else { folder_icon },
+                            14.0,
+                            theme.text_secondary,
+                        ))
                     })
                     .child(
                         div()
@@ -1578,7 +1618,7 @@ impl Waku {
         match group {
             SidebarGroup::Project(project_id) => self.select_project(project_id, cx),
             SidebarGroup::Projectless => self.create_projectless_session(cx),
-            SidebarGroup::Updated(_) => return,
+            SidebarGroup::Updated(_) | SidebarGroup::Remote => return,
         }
         let focus = self.composer_focus(cx);
         window.focus(&focus, cx);
@@ -1788,6 +1828,26 @@ impl Waku {
         }
         let focus = self.composer_focus(cx);
         window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Flip whether this session is shared with remote iroh P2P clients. Only
+    /// the owning desktop (this session's daemon host) should toggle this; the
+    /// change is persisted through the normal dirty-session save, so the
+    /// daemon keeps the flag and the catalog notifies every attached client.
+    pub(super) fn toggle_session_remote_sync(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        let Some(enabled) = self.state.session_mut(session_id).map(|session| {
+            session.remote_sync_enabled = !session.remote_sync_enabled;
+            session.remote_sync_enabled
+        }) else {
+            return;
+        };
+        self.save();
+        if enabled {
+            self.show_success_toast(tr!("sidebar.remote_sync_enabled"));
+        } else {
+            self.show_toast(tr!("sidebar.remote_sync_disabled"));
+        }
         cx.notify();
     }
 
@@ -2005,6 +2065,8 @@ impl Waku {
                 }))
                 .into_any_element()
         } else {
+            let remote_session = self.session_origin(session_id) == Some(SessionOrigin::Remote);
+            let remote_sync_enabled = session.remote_sync_enabled;
             context_menu(
                 div().w_full().child(row),
                 SharedString::from(format!("session-menu-{session_id}")),
@@ -2012,7 +2074,19 @@ impl Waku {
                 move |_| {
                     let rename_waku = waku.clone();
                     let remove_waku = waku.clone();
+                    let remote_sync_waku = waku.clone();
+                    if remote_session {
+                        return vec![MenuItem::new(tr!("sidebar.remote_session_hint"), |_, _| {})
+                            .selected(false)];
+                    }
                     vec![
+                        MenuItem::new(tr!("sidebar.remote_sync"), move |_, cx| {
+                            let _ = remote_sync_waku.update(cx, |waku, cx| {
+                                waku.toggle_session_remote_sync(session_id, cx);
+                            });
+                        })
+                        .selected(remote_sync_enabled),
+                        MenuItem::Separator,
                         MenuItem::new(tr!("common.rename"), move |window, cx| {
                             let _ = rename_waku.update(cx, |waku, cx| {
                                 waku.begin_session_rename(session_id, window, cx);

@@ -982,8 +982,8 @@ impl Waku {
                                         theme,
                                         cx,
                                         move |this, _, cx| {
-                                            this.daemon_iroh_enabled = !this.daemon_iroh_enabled;
-                                            cx.notify();
+                                            let enabled = !this.daemon_iroh_enabled;
+                                            this.set_daemon_iroh_enabled(enabled, cx);
                                         },
                                     )),
                             ),
@@ -1053,6 +1053,64 @@ impl Waku {
                             .text_color(theme.text_secondary)
                             .child(tr!("daemon.iroh_connect_description")),
                     )
+                    .when_some(self.remote_daemon.clone(), |card, _remote| {
+                        let label = self.remote_daemon_label.clone();
+                        card.child(
+                            div()
+                                .mt(px(14.0))
+                                .py(px(8.0))
+                                .px(px(10.0))
+                                .rounded(px(8.0))
+                                .bg(theme.inset)
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(icon("icons/globe.svg", 14.0, theme.success))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text)
+                                        .child(SharedString::from(
+                                            tr!("daemon.iroh_connected_label", label = label.to_string()),
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("disconnect-iroh-remote")
+                                        .tab_index(0)
+                                        .h(px(26.0))
+                                        .px(px(9.0))
+                                        .rounded(px(6.0))
+                                        .border_1()
+                                        .border_color(theme.border_strong)
+                                        .flex()
+                                        .items_center()
+                                        .cursor_default()
+                                        .text_size(sp(12.5))
+                                        .text_color(theme.text_secondary)
+                                        .focus_visible(|style| style.border_color(theme.accent))
+                                        .hover(|style| style.bg(theme.overlay))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.disconnect_remote_daemon(cx);
+                                        }))
+                                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                            if !event.keystroke.modifiers.modified()
+                                                && matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                )
+                                            {
+                                                this.disconnect_remote_daemon(cx);
+                                                cx.stop_propagation();
+                                            }
+                                        }))
+                                        .child(tr!("daemon.disconnect")),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .mt(px(14.0))
@@ -1357,6 +1415,18 @@ impl Waku {
             .unwrap_or(true)
     }
 
+    /// Apply the iroh P2P serving toggle immediately, mirroring the exposure
+    /// toggle. The switch's visual state is the *persisted* flag
+    /// (`state.daemon_exposure.iroh_enabled` via `daemon_iroh_enabled`), so
+    /// toggling here persists the change before the UI acknowledges it — a
+    /// restart then relaunches the daemon without `--iroh`, instead of
+    /// reloading the stale enabled value.
+    fn set_daemon_iroh_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        let mut settings = self.state.daemon_exposure.clone();
+        settings.iroh_enabled = enabled;
+        self.apply_daemon_exposure(settings, cx);
+    }
+
     fn set_daemon_exposure_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if !enabled {
             self.daemon_token_revealed = false;
@@ -1391,11 +1461,9 @@ impl Waku {
         self.apply_daemon_exposure(settings, cx);
     }
 
-    /// Dial a remote daemon over iroh from the ticket pasted in the Daemon
-    /// settings page. The existing supervisor's target is swapped in place,
-    /// so every live clone (persisted state, composer drafts, runtime
-    /// adapters) sees the remote daemon; live runtimes are dropped, mirroring
-    /// a managed daemon restart.
+    /// Dial a remote daemon over iroh and mount it as a *secondary* connection.
+    /// The local supervisor keeps running and its sessions stay live; sessions
+    /// the remote owner shared appear in the sidebar's remote group.
     fn connect_iroh_remote(&mut self, cx: &mut Context<Self>) {
         let ticket = self
             .daemon_iroh_input
@@ -1407,21 +1475,47 @@ impl Waku {
             self.show_toast(tr!("daemon.iroh_ticket_missing"));
             return;
         }
+        self.begin_remote_connection(ticket, /* persist */ true, /* quiet */ false, cx);
+    }
+
+    /// Dial `ticket` in the background and mount the connection on success.
+    /// When `persist` is set, the ticket is saved so a later launch re-attaches
+    /// automatically and re-syncs the remote sessions. `quiet` suppresses the
+    /// success toast for the silent startup path.
+    fn begin_remote_connection(
+        &mut self,
+        ticket: String,
+        persist: bool,
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let label = ticket
+            .parse::<waku_client::RemoteTicket>()
+            .map(|parsed| parsed.label)
+            .unwrap_or_else(|_| ticket.clone());
         self.daemon_iroh_connecting = true;
         cx.notify();
 
-        let daemon = self.daemon.clone();
+        let connect_ticket = ticket.clone();
         let connecting = cx
             .background_executor()
-            .spawn(async move { daemon.switch_to_remote(&ticket) });
+            .spawn(async move { waku_client::DaemonSupervisor::connect_iroh(&connect_ticket) });
         cx.spawn(async move |this, cx| {
             let result = connecting.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update(cx, move |this, cx| {
                 this.daemon_iroh_connecting = false;
                 match result {
-                    Ok(()) => {
-                        this.runtimes.clear();
-                        this.show_success_toast(tr!("daemon.iroh_connected"));
+                    Ok(remote) => {
+                        this.remote_daemon = Some(remote);
+                        this.remote_daemon_label = SharedString::from(label);
+                        if persist {
+                            this.state.remote_ticket = Some(ticket);
+                            this.save();
+                        }
+                        this.restart_remote_task_state_sync();
+                        if !quiet {
+                            this.show_success_toast(tr!("daemon.iroh_connected"));
+                        }
                     }
                     Err(error) => {
                         this.show_toast(tr!("daemon.iroh_connect_failed", error = error.to_string()))
@@ -1431,6 +1525,57 @@ impl Waku {
             });
         })
         .detach();
+    }
+
+    /// Re-attach the persisted remote ticket on launch, silently. The remote
+    /// connection is optional: a stale ticket simply fails and leaves the app
+    /// on its local daemon.
+    pub(super) fn reconnect_persisted_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(ticket) = self.state.remote_ticket.clone() else {
+            return;
+        };
+        self.begin_remote_connection(ticket, /* persist */ false, /* quiet */ true, cx);
+    }
+
+    /// Drop the secondary iroh connection and fold any remote selection back
+    /// onto the local daemon.
+    pub(super) fn disconnect_remote_daemon(&mut self, cx: &mut Context<Self>) {
+        let was_remote_selected = self
+            .state
+            .selected_session
+            .is_some_and(|id| self.session_origin(id) == Some(SessionOrigin::Remote));
+        let remote_ids = self
+            .remote_sessions
+            .iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        for id in remote_ids {
+            self.runtimes.remove(&id);
+            self.runtime_attach_pending.remove(&id);
+            self.runtime_attach_misses.remove(&id);
+            self.background_work.remove(&id);
+            self.remove_right_panel_session_state(id);
+            self.task_switcher.remove(id);
+        }
+        self.remote_sessions.clear();
+        self.remote_daemon = None;
+        self.remote_daemon_label = SharedString::default();
+        // Stop auto-reconnecting to the dropped remote on the next launch.
+        self.state.remote_ticket = None;
+        self.save();
+        if was_remote_selected {
+            self.state.selected_session = None;
+            let next = self
+                .state
+                .sessions
+                .iter()
+                .max_by_key(|session| session.updated_at)
+                .map(|session| session.id);
+            if let Some(next) = next {
+                self.select_session(next, cx);
+            }
+        }
+        cx.notify();
     }
 
     fn regenerate_daemon_token(&mut self, cx: &mut Context<Self>) {

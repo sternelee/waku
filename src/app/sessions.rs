@@ -38,15 +38,13 @@ impl Waku {
             .sessions
             .iter()
             .any(|session| session.id == session_id)
+            && !self.remote_sessions.iter().any(|session| session.id == session_id)
         {
             return;
         }
         self.reveal_sidebar_session(session_id);
         let needs_hydration = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .is_some_and(|session| !session.detail_loaded);
         if needs_hydration {
             self.pending_session_activation = Some(PendingSessionActivation {
@@ -100,15 +98,19 @@ impl Waku {
     /// current selection stays rendered until the requested session is whole.
     pub(super) fn ensure_session_loaded(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let needs_hydration = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .is_some_and(|session| !session.detail_loaded);
         if !needs_hydration || !self.session_hydrations.insert(session_id) {
             return;
         }
-        let daemon = self.daemon.clone();
+        // Hydrate from whichever daemon owns the session.
+        let daemon = match self.session_origin(session_id) {
+            Some(SessionOrigin::Remote) => self
+                .remote_daemon
+                .clone()
+                .unwrap_or_else(|| self.daemon.clone()),
+            _ => self.daemon.clone(),
+        };
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -125,17 +127,7 @@ impl Waku {
                 waku.session_hydrations.remove(&session_id);
                 match result {
                     Ok(session) => {
-                        let replaced = if let Some(existing) = waku
-                            .state
-                            .sessions
-                            .iter_mut()
-                            .find(|existing| existing.id == session_id)
-                        {
-                            *existing = session;
-                            true
-                        } else {
-                            false
-                        };
+                        let replaced = waku.replace_session_any(session_id, session);
                         let pending = waku
                             .pending_session_activation
                             .filter(|pending| pending.session_id == session_id);
@@ -228,7 +220,11 @@ impl Waku {
             .selected_session()
             .is_some_and(AgentSession::has_started)
         {
-            self.start_runtime_attachment(session_id, cx);
+            if self.session_origin(session_id) == Some(SessionOrigin::Remote) {
+                self.start_remote_runtime_attachment(session_id, cx);
+            } else {
+                self.start_runtime_attachment(session_id, cx);
+            }
         }
         cx.notify();
     }

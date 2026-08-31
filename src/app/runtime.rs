@@ -92,6 +92,79 @@ fn load_remote_task_state(
     Ok(RemoteTaskStateSnapshot { projects, sessions })
 }
 
+/// Long-lived worker that streams a daemon's task-state catalog into a
+/// channel. Mirrored by the local and remote supervisors so both session
+/// lists stay live without sharing state.
+fn spawn_task_state_sync(
+    name: String,
+    clients: crossbeam_channel::Receiver<waku_client::DaemonClient>,
+    results: Sender<Result<RemoteTaskStateSnapshot, String>>,
+    event_wake: smol::channel::Sender<()>,
+) {
+    std::thread::Builder::new()
+        .name(name)
+        .spawn(move || {
+            let Ok(mut client) = clients.recv() else {
+                return;
+            };
+            loop {
+                while let Ok(newer) = clients.try_recv() {
+                    client = newer;
+                }
+                let revisions = client.subscribe_task_state();
+                let result = load_remote_task_state(&client).map_err(|error| error.to_string());
+                if results.send(result).is_err() {
+                    return;
+                }
+                signal_event_pump(&event_wake);
+                client = loop {
+                    crossbeam_channel::select! {
+                        recv(clients) -> replacement => {
+                            let Ok(mut replacement) = replacement else {
+                                return;
+                            };
+                            while let Ok(newer) = clients.try_recv() {
+                                replacement = newer;
+                            }
+                            break replacement;
+                        }
+                        recv(revisions) -> revision => {
+                            if revision.is_err() {
+                                // Managed replacement publishes the new client
+                                // after the old socket closes. Wait for that
+                                // publication instead of exiting permanently.
+                                let Ok(replacement) = clients.recv() else {
+                                    return;
+                                };
+                                break replacement;
+                            }
+                            while revisions.try_recv().is_ok() {}
+                            let result = load_remote_task_state(&client)
+                                .map_err(|error| error.to_string());
+                            if results.send(result).is_err() {
+                                return;
+                            }
+                            signal_event_pump(&event_wake);
+                        }
+                    }
+                };
+            }
+        })
+        .ok();
+}
+
+/// Drain a task-state result channel down to its newest payload, coalescing
+/// any bursts that arrived between pump ticks.
+fn coalesce_task_state(
+    channel: &crossbeam_channel::Receiver<Result<RemoteTaskStateSnapshot, String>>,
+) -> Option<Result<RemoteTaskStateSnapshot, String>> {
+    let mut latest = None;
+    while let Ok(result) = channel.try_recv() {
+        latest = Some(result);
+    }
+    latest
+}
+
 pub(super) fn session_has_active_provider_turn(session: &AgentSession) -> bool {
     session.is_busy()
         && session
@@ -901,67 +974,33 @@ fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedRes
 impl Waku {
     pub(super) fn restart_task_state_sync(&self) {
         let clients = self.daemon.subscribe_clients();
-        let results = self.task_state_sync_tx.clone();
-        let event_wake = self.event_wake_tx.clone();
-        std::thread::Builder::new()
-            .name("waku-task-state-sync".into())
-            .spawn(move || {
-                let Ok(mut client) = clients.recv() else {
-                    return;
-                };
-                loop {
-                    while let Ok(newer) = clients.try_recv() {
-                        client = newer;
-                    }
-                    let revisions = client.subscribe_task_state();
-                    let result = load_remote_task_state(&client).map_err(|error| error.to_string());
-                    if results.send(result).is_err() {
-                        return;
-                    }
-                    signal_event_pump(&event_wake);
-                    client = loop {
-                        crossbeam_channel::select! {
-                            recv(clients) -> replacement => {
-                                let Ok(mut replacement) = replacement else {
-                                    return;
-                                };
-                                while let Ok(newer) = clients.try_recv() {
-                                    replacement = newer;
-                                }
-                                break replacement;
-                            }
-                            recv(revisions) -> revision => {
-                                if revision.is_err() {
-                                    // Managed replacement publishes the new
-                                    // client after the old socket closes. Wait
-                                    // for that publication instead of exiting
-                                    // the task-state sync worker permanently.
-                                    let Ok(replacement) = clients.recv() else {
-                                        return;
-                                    };
-                                    break replacement;
-                                }
-                                while revisions.try_recv().is_ok() {}
-                                let result = load_remote_task_state(&client)
-                                    .map_err(|error| error.to_string());
-                                if results.send(result).is_err() {
-                                    return;
-                                }
-                                signal_event_pump(&event_wake);
-                            }
-                        }
-                    };
-                }
-            })
-            .ok();
+        spawn_task_state_sync(
+            "waku-task-state-sync".into(),
+            clients,
+            self.task_state_sync_tx.clone(),
+            self.event_wake_tx.clone(),
+        );
+    }
+
+    /// Start (or restart) the task-state sync worker for the secondary iroh
+    /// connection. Unlike the local worker, this one's client stream is owned
+    /// by `remote_daemon` and its snapshots land in a separate channel so
+    /// remote sessions merge into `remote_sessions` without touching local
+    /// persistence.
+    pub(super) fn restart_remote_task_state_sync(&self) {
+        let Some(remote) = self.remote_daemon.clone() else {
+            return;
+        };
+        spawn_task_state_sync(
+            "waku-remote-task-state-sync".into(),
+            remote.subscribe_clients(),
+            self.remote_task_state_tx.clone(),
+            self.event_wake_tx.clone(),
+        );
     }
 
     fn drain_task_state_sync_events(&mut self, cx: &mut Context<Self>) -> bool {
-        let mut latest = None;
-        while let Ok(result) = self.task_state_sync_events.try_recv() {
-            latest = Some(result);
-        }
-        let Some(result) = latest else {
+        let Some(result) = coalesce_task_state(&self.task_state_sync_events) else {
             return false;
         };
         match result {
@@ -974,6 +1013,107 @@ impl Waku {
                 false
             }
         }
+    }
+
+    /// Merge the remote daemon's shared-session catalog into the sidebar's
+    /// remote group. Returns true when the visible list changed.
+    fn drain_remote_task_state_sync_events(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(result) = coalesce_task_state(&self.remote_task_state_events) else {
+            return false;
+        };
+        match result {
+            Ok(snapshot) => {
+                self.apply_remote_session_catalog(snapshot, cx);
+                true
+            }
+            Err(error) => {
+                eprintln!("could not refresh remote daemon task state: {error}");
+                false
+            }
+        }
+    }
+
+    fn apply_remote_session_catalog(&mut self, snapshot: RemoteTaskStateSnapshot, cx: &mut Context<Self>) {
+        // Preserve hydrated transcripts and locally-tracked runtime state for
+        // sessions the remote daemon still lists; the projection is list-only.
+        let runtime_ids = self.runtimes.keys().copied().collect::<HashSet<_>>();
+        let removed = merge_remote_session_catalog(
+            &mut self.remote_sessions,
+            snapshot.sessions,
+            |session_id| runtime_ids.contains(&session_id),
+        );
+        for session_id in &removed {
+            self.runtime_attach_pending.remove(session_id);
+            self.runtime_attach_misses.remove(session_id);
+            self.runtimes.remove(session_id);
+            self.background_work.remove(session_id);
+            self.remove_right_panel_session_state(*session_id);
+            self.task_switcher.remove(*session_id);
+        }
+
+        // Drop the remote selection when its session was unshared on the
+        // owning side; fall back to the newest local session like the local
+        // merge does when a local session disappears.
+        if self
+            .state
+            .selected_session
+            .is_some_and(|selected| removed.contains(&selected))
+        {
+            let previous_project = self.state.selected_project;
+            self.state.selected_session = None;
+            let next = self
+                .state
+                .sessions
+                .iter()
+                .filter(|session| {
+                    previous_project.is_none_or(|project| session.project_id == project)
+                })
+                .max_by_key(|session| session.updated_at)
+                .map(|session| session.id);
+            if let Some(next) = next {
+                self.select_session(next, cx);
+            }
+        }
+
+        // Attach to busy shared sessions, mirroring the local merge.
+        let attach = self
+            .remote_sessions
+            .iter()
+            .filter(|session| {
+                session.status.is_busy()
+                    || (self.state.selected_session == Some(session.id) && session.has_started())
+            })
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        for session_id in attach {
+            self.start_remote_runtime_attachment(session_id, cx);
+        }
+        cx.notify();
+    }
+
+    /// Attach to a remote daemon's session, using the secondary iroh
+    /// supervisor so the driver streams from and controls the remote host.
+    pub(super) fn start_remote_runtime_attachment(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if self.runtimes.contains_key(&session_id)
+            || !self.runtime_attach_pending.insert(session_id)
+        {
+            return;
+        }
+        let Some(daemon) = self.remote_daemon.clone() else {
+            self.runtime_attach_pending.remove(&session_id);
+            return;
+        };
+        let event_wake = self.event_wake_tx.clone();
+        cx.spawn(async move |waku, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { attach_driver(daemon, session_id, event_wake) })
+                .await;
+            let _ = waku.update(cx, move |waku, cx| {
+                waku.finish_runtime_attachment(session_id, result, cx);
+            });
+        })
+        .detach();
     }
 
     fn apply_remote_task_state(
@@ -1087,16 +1227,8 @@ impl Waku {
         match result {
             Ok(Some((session, prepared))) => {
                 self.runtime_attach_misses.remove(&session_id);
-                let Some(index) = self
-                    .state
-                    .sessions
-                    .iter()
-                    .position(|candidate| candidate.id == session_id)
-                else {
-                    return;
-                };
-                if !self.runtimes.contains_key(&session_id) {
-                    self.state.sessions[index] = session;
+                let replaced = self.replace_session_any(session_id, session);
+                if replaced && !self.runtimes.contains_key(&session_id) {
                     self.install_prepared_driver(session_id, prepared);
                     if self.state.selected_session == Some(session_id) {
                         self.reset_visible_state();
@@ -1213,8 +1345,59 @@ impl Waku {
     }
 
     pub(super) fn selected_session(&self) -> Option<&AgentSession> {
-        let id = self.state.selected_session?;
-        self.state.sessions.iter().find(|session| session.id == id)
+        self.selected_session_by_id(self.state.selected_session?)
+    }
+
+    pub(super) fn selected_session_by_id(&self, session_id: Uuid) -> Option<&AgentSession> {
+        self.state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .or_else(|| self.remote_sessions.iter().find(|session| session.id == session_id))
+    }
+
+    /// Which daemon owns `session_id` (or `None` when the id is unknown).
+    pub(super) fn session_origin(&self, session_id: Uuid) -> Option<SessionOrigin> {
+        if self.remote_sessions.iter().any(|session| session.id == session_id) {
+            return Some(SessionOrigin::Remote);
+        }
+        if self.state.sessions.iter().any(|session| session.id == session_id) {
+            return Some(SessionOrigin::Local);
+        }
+        None
+    }
+
+    /// Mutable access to a session regardless of origin. Local sessions keep
+    /// the persisted dirty-marking of `PersistedState`; remote sessions are
+    /// edited in the synced list and are never written back to the local
+    /// daemon.
+    pub(super) fn session_mut_any(&mut self, session_id: Uuid) -> Option<&mut AgentSession> {
+        match self.session_origin(session_id) {
+            Some(SessionOrigin::Remote) => self
+                .remote_sessions
+                .iter_mut()
+                .find(|session| session.id == session_id),
+            _ => self.state.session_mut(session_id),
+        }
+    }
+
+    /// Replace a session in whichever list owns it, returning whether it was
+    /// found. Used by hydration and attachment so a session's origin decides
+    /// where its detail lands.
+    pub(super) fn replace_session_any(
+        &mut self,
+        session_id: Uuid,
+        session: AgentSession,
+    ) -> bool {
+        let list = match self.session_origin(session_id) {
+            Some(SessionOrigin::Remote) => &mut self.remote_sessions,
+            _ => &mut self.state.sessions,
+        };
+        let Some(existing) = list.iter_mut().find(|existing| existing.id == session_id) else {
+            return false;
+        };
+        *existing = session;
+        true
     }
 
     fn active_turn_finished_event(
@@ -1222,11 +1405,7 @@ impl Waku {
         session_id: Uuid,
         outcome: crate::analytics::TurnOutcome,
     ) -> Option<crate::analytics::Event> {
-        let session = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)?;
+        let session = self.selected_session_by_id(session_id)?;
         let turn = session
             .turns
             .last()
@@ -1249,8 +1428,7 @@ impl Waku {
     ) -> Option<(Uuid, usize)> {
         let event = self.active_turn_finished_event(session_id, outcome);
         let result = self
-            .state
-            .session_mut(session_id)?
+            .session_mut_any(session_id)?
             .finish_active_turn(status);
         if result.is_some()
             && let Some(event) = event
@@ -1291,7 +1469,12 @@ impl Waku {
     /// Marks the session for the next save; see `PersistedState::session_mut`.
     pub(super) fn selected_session_mut(&mut self) -> Option<&mut AgentSession> {
         let id = self.state.selected_session?;
-        self.state.session_mut(id)
+        // Metadata edits to a remote session (model, traits, mode) must be
+        // pushed back to the remote daemon; transcript deltas come from it.
+        if self.session_origin(id) == Some(SessionOrigin::Remote) {
+            self.remote_dirty_sessions.insert(id);
+        }
+        self.session_mut_any(id)
     }
 
     pub(super) fn selected_runtime(&self) -> Option<&SessionRuntime> {
@@ -1592,11 +1775,46 @@ impl Waku {
             .save(&mut self.state)
             .err()
             .map(|error| error.to_string());
-        if let Some(error) = daemon_error.or(app_error) {
+        // Remote sessions edited here (model, traits, mode) are pushed back as
+        // list-only projections so the remote daemon persists the metadata
+        // without our transcript view clobbering its canonical messages/turns.
+        let remote_error = self.flush_remote_session_metadata();
+        if let Some(error) = daemon_error.or(app_error).or(remote_error) {
             self.show_toast(tr!("errors.save_local_state", error = error));
         } else {
             self.stream_state_dirty = false;
         }
+    }
+
+    /// Push list-only metadata for edited remote sessions back to the remote
+    /// daemon. Returns an error string to surface like the other save paths.
+    fn flush_remote_session_metadata(&mut self) -> Option<String> {
+        let Some(remote) = self.remote_daemon.as_ref() else {
+            return None;
+        };
+        let dirty = std::mem::take(&mut self.remote_dirty_sessions);
+        let sessions = self
+            .remote_sessions
+            .iter()
+            .filter(|session| dirty.contains(&session.id))
+            .map(AgentSession::list_projection)
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return None;
+        }
+        remote
+            .client()
+            .notify(
+                Uuid::nil(),
+                Uuid::nil(),
+                waku_client::Command::SaveTaskState {
+                    projects: Vec::new(),
+                    live_session_ids: sessions.iter().map(|session| session.id).collect(),
+                    sessions,
+                },
+            )
+            .err()
+            .map(|error| error.to_string())
     }
 
     fn checkpoint_capture_pending(&self, session_id: Uuid, turn_count: usize) -> bool {
@@ -2628,10 +2846,7 @@ impl Waku {
     /// are torn down so the next prompt starts with the new options.
     pub(super) fn apply_session_options(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let Some(options) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .map(|session| self.session_options(session))
         else {
             return;
@@ -2996,7 +3211,7 @@ impl Waku {
         if submission.prompt.is_empty() {
             return;
         }
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             session
                 .queued_messages
                 .push(submission.into_queued_message());
@@ -3091,10 +3306,7 @@ impl Waku {
             return;
         }
         let Some(session) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
         else {
             return;
         };
@@ -3108,8 +3320,7 @@ impl Waku {
             return;
         }
         let Some(message) = self
-            .state
-            .session_mut(session_id)
+            .session_mut_any(session_id)
             .map(|session| session.queued_messages.remove(0))
         else {
             return;
@@ -3155,6 +3366,14 @@ impl Waku {
         if session.status.is_busy() {
             self.enqueue_follow_up_submission(session_id, submission, cx);
             return;
+        }
+        // Continuing a session owned by a remote daemon skips every local
+        // filesystem concern — worktree creation, pre-turn checkpoints, and
+        // project lookup are meaningless on this host. The runtime is already
+        // attached over iroh, so the submission resolves straight through the
+        // existing driver.
+        if self.session_origin(session_id) == Some(SessionOrigin::Remote) {
+            return self.submit_remote_submission(session_id, submission, selected, cx);
         }
         let prompt = submission.prompt.clone();
         let human_prompt = submission.human_prompt();
@@ -3295,6 +3514,107 @@ impl Waku {
         .detach();
     }
 
+    /// Continue a remote (iroh-shared) session without touching this host's
+    /// filesystem. The turn begins in the transcript as usual, then resolves
+    /// straight through the attached remote driver — no worktree creation, no
+    /// pre-turn checkpoint, no local project lookup.
+    fn submit_remote_submission(
+        &mut self,
+        session_id: Uuid,
+        submission: ComposerSubmission,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.selected_session_by_id(session_id).cloned() else {
+            return;
+        };
+        let prompt = submission.prompt.clone();
+        let human_prompt = submission.human_prompt();
+        let has_input = !submission
+            .display_content
+            .as_deref()
+            .unwrap_or(&submission.prompt)
+            .trim()
+            .is_empty();
+        let next_turn_count = session.turns.len() + 1;
+        let provider = session.provider.id();
+        let model = self
+            .session_options(&session)
+            .model
+            .unwrap_or_else(|| "default".into());
+        let attachment_count = submission.attachments.len();
+
+        if selected {
+            self.sync_transcript_rows();
+        }
+        let previous_kinds = if selected {
+            self.transcript_row_kinds.borrow().clone()
+        } else {
+            Vec::new()
+        };
+        let transcript_anchor = if let Some(session) = self.session_mut_any(session_id) {
+            session.set_title_from_prompt(&human_prompt);
+            let turn_id = session.begin_turn_with_presentation(
+                &prompt,
+                submission.display_content.clone(),
+                submission.attachments.clone(),
+            );
+            session.status = SessionStatus::Connecting;
+            session.updated_at = unix_time();
+            selected.then_some(TranscriptAnchor {
+                session_id,
+                turn_id,
+            })
+        } else {
+            None
+        };
+        self.analytics
+            .track(crate::analytics::Event::TurnSubmitted {
+                provider,
+                model,
+                turn_number: next_turn_count,
+                workspace: "remote",
+                projectless: false,
+                attachment_count,
+                has_input,
+            });
+        self.submission_preparations.insert(session_id);
+        if selected {
+            self.activities_expanded.clear();
+            self.expanded_activity_items.clear();
+            self.expanded_turns.clear();
+            self.expanded_changed_files.clear();
+            self.transcript_control_focuses.borrow_mut().clear();
+            self.message_edit = None;
+            self.hide_toast();
+            self.transcript_anchor.set(transcript_anchor);
+            let mut provisional = self.transcript_rows.viewport_bounds().size.height;
+            if provisional <= Pixels::ZERO {
+                provisional = self.anchored_transcript_rows.viewport_bounds().size.height;
+            }
+            self.transcript_anchor_end_space.set(provisional);
+            self.transcript_anchor_following.set(true);
+            self.splice_transcript_rows_after_visibility_change(&previous_kinds);
+            self.scroll_transcript_to_anchor();
+        }
+        cx.notify();
+
+        // The remote runtime is already attached on selection; hand the turn
+        // straight to it. A workspace never changes here, and there is no
+        // checkpoint to warn about.
+        let workspace = session.workspace.clone();
+        self.finish_submission_preparation(
+            session_id,
+            submission,
+            Ok(PreparedSubmission {
+                workspace,
+                checkpoint_warning: None,
+                driver: None,
+            }),
+            cx,
+        );
+    }
+
     fn finish_submission_preparation(
         &mut self,
         session_id: Uuid,
@@ -3355,15 +3675,13 @@ impl Waku {
             checkpoint_warning,
             driver: prepared_driver,
         } = prepared;
+        let remote = self.session_origin(session_id) == Some(SessionOrigin::Remote);
         // The turn began at accept time; it must still be the untouched one
         // this preparation belongs to. Cancellation is blocked while the
         // preparation set holds the session, so a mismatch means the session
         // was replaced under the preparation rather than a user action.
         let can_start = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .is_some_and(|session| {
                 session.status == SessionStatus::Connecting
                     && session.turns.last().is_some_and(|turn| {
@@ -3376,12 +3694,12 @@ impl Waku {
             return;
         }
 
-        let workspace_changed = self.state.session_mut(session_id).is_some_and(|session| {
+        let workspace_changed = self.session_mut_any(session_id).is_some_and(|session| {
             let changed = session.workspace != workspace;
             session.workspace = workspace;
             changed
         });
-        if selected && workspace_changed {
+        if selected && workspace_changed && !remote {
             self.invalidate_workspace_queries(cx);
             self.reload_clean_right_panel_file_editors(cx);
             self.ensure_right_panel_terminals(cx);
@@ -3415,10 +3733,7 @@ impl Waku {
             self.show_toast(warning);
         }
         let provider = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .map(|session| session.provider)
             .unwrap_or(self.state.last_provider);
         // Provider syntax resolves here, at the seam between the transcript
@@ -3433,7 +3748,7 @@ impl Waku {
             Err(error) => {
                 failed_to_start = true;
                 let message = tr!("errors.start_agent", error = error);
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     session.status = SessionStatus::Failed;
                     session.push_message(MessageRole::Assistant, message);
                 }
@@ -3479,6 +3794,7 @@ impl Waku {
             | self.drain_computer_permission_events()
             | self.drain_plan_usage_events()
             | self.drain_task_state_sync_events(cx)
+            | self.drain_remote_task_state_sync_events(cx)
         {
             cx.notify();
         }

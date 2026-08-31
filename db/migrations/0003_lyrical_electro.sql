@@ -1,0 +1,1 @@
+ALTER TABLE `sessions` ADD `remote_sync_enabled` integer DEFAULT false NOT NULL;

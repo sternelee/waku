@@ -575,6 +575,15 @@ struct RemoteTaskStateSnapshot {
     sessions: Vec<AgentSession>,
 }
 
+/// Which daemon a session belongs to. Local sessions live in the persisted
+/// `state.sessions`; remote ones are synced into `remote_sessions` from a
+/// secondary iroh P2P connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SessionOrigin {
+    Local,
+    Remote,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct EscapeStopTarget {
     session_id: Uuid,
@@ -1266,6 +1275,20 @@ pub struct Waku {
     event_wake_tx: smol::channel::Sender<()>,
     task_state_sync_tx: Sender<Result<RemoteTaskStateSnapshot, String>>,
     task_state_sync_events: Receiver<Result<RemoteTaskStateSnapshot, String>>,
+    /// Secondary iroh P2P connection to another machine's daemon. The local
+    /// supervisor (`self.daemon`) is never replaced: a remote peer attaches
+    /// here to continue sessions the owning desktop shared, and its sessions
+    /// are listed alongside local ones.
+    remote_daemon: Option<waku_client::DaemonSupervisor>,
+    remote_daemon_label: SharedString,
+    remote_sessions: Vec<AgentSession>,
+    /// Remote sessions whose metadata (model, traits, mode) was edited here
+    /// and still needs pushing back to the remote daemon. Transcript deltas
+    /// are NOT tracked here: the remote daemon owns messages and turns, and
+    /// pushing our view of them back would clobber its canonical state.
+    remote_dirty_sessions: HashSet<Uuid>,
+    remote_task_state_tx: Sender<Result<RemoteTaskStateSnapshot, String>>,
+    remote_task_state_events: Receiver<Result<RemoteTaskStateSnapshot, String>>,
     runtimes: HashMap<Uuid, SessionRuntime>,
     runtime_attach_pending: HashSet<Uuid>,
     runtime_attach_misses: HashMap<Uuid, u8>,
@@ -2195,6 +2218,7 @@ impl Waku {
         let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
         let (task_state_sync_tx, task_state_sync_events) = unbounded();
+        let (remote_task_state_tx, remote_task_state_events) = unbounded();
         #[cfg(target_os = "macos")]
         {
             let computer_permission_tx = computer_permission_tx.clone();
@@ -2847,6 +2871,12 @@ impl Waku {
                 event_wake_tx,
                 task_state_sync_tx,
                 task_state_sync_events,
+                remote_daemon: None,
+                remote_daemon_label: SharedString::default(),
+                remote_sessions: Vec::new(),
+                remote_dirty_sessions: HashSet::new(),
+                remote_task_state_tx,
+                remote_task_state_events,
                 runtimes: HashMap::new(),
                 runtime_attach_pending: HashSet::new(),
                 runtime_attach_misses: HashMap::new(),
@@ -3030,6 +3060,10 @@ impl Waku {
         // first frame.
         entity.update(cx, |this, cx| {
             this.restart_task_state_sync();
+            // Re-attach a previously configured remote daemon and fold its
+            // shared sessions into the sidebar, like the local daemon's own
+            // task-state sync below.
+            this.reconnect_persisted_remote(cx);
             for session_id in startup_live_session_ids {
                 this.start_runtime_attachment(session_id, cx);
             }

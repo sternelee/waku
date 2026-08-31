@@ -127,6 +127,7 @@ daemon.iroh_connect_description: 粘贴另一台机器上守护进程发布的�
 daemon.iroh_connect: 连接
 daemon.iroh_connecting: 正在连接…
 daemon.iroh_connected: 已连接到远程守护进程
+daemon.iroh_connected_label: "已连接到 {label}"
 daemon.iroh_connect_failed: "无法连接到远程守护进程: {error}"
 daemon.iroh_ticket_missing: 请先粘贴远程票据
 daemon.disconnect: 断开连接
@@ -258,6 +259,12 @@ sidebar.just_now: 刚刚
 sidebar.minutes_ago: "%{count} 分钟前"
 sidebar.hours_ago: "%{count} 小时前"
 sidebar.days_ago: "%{count} 天前"
+sidebar.remote_sync: 允许远程同步与操控
+sidebar.remote_group: 远程会话
+sidebar.remote_session_hint: 来自另一台机器的共享会话
+sidebar.remote_sync_hint: 通过 iroh P2P 将此会话共享给远程 Waku 客户端，使其在运行期间可以查看并继续这个会话。
+sidebar.remote_sync_enabled: 已开启此会话的远程同步
+sidebar.remote_sync_disabled: 已关闭此会话的远程同步
 sidebar.unknown_project: 未知项目
 sidebar.close: 关闭侧边栏
 sidebar.hide: 隐藏侧边栏

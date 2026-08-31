@@ -2,7 +2,7 @@ use super::*;
 
 impl Waku {
     pub(super) fn finish_streaming_assistant(&mut self, session_id: Uuid) {
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             for message in &mut session.messages {
                 if message.role == MessageRole::Assistant && message.streaming {
                     message.streaming = false;
@@ -22,13 +22,50 @@ impl Waku {
             self.complete_reasoning_activity(session_id);
         }
         let continuing = previous_phase == Some(StreamPhase::Text);
-        append_text_delta_to_session(&mut self.state.sessions, session_id, continuing, delta);
-        self.state.mark_session_dirty(session_id);
+        self.append_text_delta_to_session_any(session_id, continuing, delta);
         runtime.stream_phase = Some(StreamPhase::Text);
     }
 
+    /// Origin-aware wrapper so a delta streaming from a remote session lands
+    /// in `remote_sessions` instead of the local daemon's session list.
+    pub(super) fn append_text_delta_to_session_any(
+        &mut self,
+        session_id: Uuid,
+        continuing: bool,
+        delta: String,
+    ) {
+        let Some(session) = self.session_mut_any(session_id) else {
+            return;
+        };
+        if !continuing {
+            for message in &mut session.messages {
+                if message.role == MessageRole::Assistant && message.streaming {
+                    message.streaming = false;
+                }
+            }
+        }
+        let existing = continuing.then(|| {
+            session
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == MessageRole::Assistant && message.streaming)
+        });
+        if let Some(Some(message)) = existing {
+            message.content.push_str(&delta);
+        } else {
+            let mut message = session
+                .active_turn_id()
+                .map(|turn_id| Message::new_for_turn(MessageRole::Assistant, delta.clone(), turn_id))
+                .unwrap_or_else(|| Message::new(MessageRole::Assistant, delta));
+            message.streaming = true;
+            session.messages.push(message);
+        }
+        session.updated_at = unix_time();
+    }
+
     fn complete_reasoning_activity(&mut self, session_id: Uuid) {
-        let Some(session) = self.state.session_mut(session_id) else {
+        let Some(session) = self.session_mut_any(session_id) else {
             return;
         };
         let reasoning = session
@@ -58,7 +95,7 @@ impl Waku {
         if !continuing {
             self.finish_streaming_assistant(session_id);
         }
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             if continuing
                 && let Some(reasoning) = session
                     .transcript_blocks
@@ -108,7 +145,7 @@ impl Waku {
             previous_phase,
             Some(StreamPhase::Reasoning | StreamPhase::Activity)
         );
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             for block in session.transcript_blocks.iter_mut().rev() {
                 let matching = block.activities.iter_mut().rev().find(|activity| {
                     item.source_id
@@ -172,7 +209,7 @@ impl Waku {
     }
 
     pub(super) fn complete_turn_blocks(&mut self, session_id: Uuid) {
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             for block in &mut session.transcript_blocks {
                 for activity in &mut block.activities {
                     activity.complete = true;
@@ -226,7 +263,7 @@ impl Waku {
         runtime.last_active_at = Instant::now();
         match event {
             DriverEvent::RuntimeEventCursorAdvanced(cursor) => {
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     session.runtime_event_cursor = Some(cursor);
                 }
             }
@@ -234,7 +271,7 @@ impl Waku {
                 runtime.last_driver_error = None;
                 runtime.last_background_refresh_at = Instant::now();
                 runtime.driver.refresh_background_work();
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     if let Some(ProviderResumeCursor::Claude {
                         resume_at: Some(message_id),
                         ..
@@ -249,12 +286,12 @@ impl Waku {
                 }
             }
             DriverEvent::AgentPresetSelected(agent_preset) => {
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     session.agent_preset = agent_preset;
                 }
             }
             DriverEvent::AutoTitleUpdated(title) => {
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     session.set_auto_title(title);
                 }
             }
@@ -272,7 +309,7 @@ impl Waku {
             }
             DriverEvent::TurnStarted => {
                 runtime.last_driver_error = None;
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     if session.active_turn_id().is_some() {
                         // Covers submissions and the optimistic pursuit turn
                         // a `/goal` began: the provider's start confirms it.
@@ -350,7 +387,7 @@ impl Waku {
                         detail,
                         options,
                     });
-                    if let Some(session) = self.state.session_mut(session_id) {
+                    if let Some(session) = self.session_mut_any(session_id) {
                         session.status = SessionStatus::Waiting;
                     }
                 }
@@ -365,7 +402,7 @@ impl Waku {
                         self.user_input_answer
                             .update(cx, |input, cx| input.clear(cx));
                     }
-                    if let Some(session) = self.state.session_mut(session_id) {
+                    if let Some(session) = self.session_mut_any(session_id) {
                         session.status = SessionStatus::Waiting;
                     }
                 }
@@ -389,7 +426,7 @@ impl Waku {
                 // The provider folded the message into the live turn. Append
                 // it to the same turn so the transcript mirrors the provider
                 // conversation (no new turn boundary).
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     session.push_user_message_with_presentation(
                         message,
                         submission.display_content,
@@ -435,7 +472,7 @@ impl Waku {
                     // events are handled — an inline submit would spawn a
                     // second driver process only to have it clobbered when the
                     // drain re-inserts the detached runtime.
-                    if let Some(session) = self.state.session_mut(session_id) {
+                    if let Some(session) = self.session_mut_any(session_id) {
                         session
                             .queued_messages
                             .insert(0, submission.into_queued_message());
@@ -469,7 +506,7 @@ impl Waku {
                 } else {
                     self.goal_observed_at.remove(&session_id);
                 }
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     if let Some(goal) = &goal
                         && session.messages.is_empty()
                     {
@@ -489,7 +526,7 @@ impl Waku {
             } => {
                 // Meta about the conversation, not turn output: it applies
                 // even while a rewound or cancelled turn's tail drains.
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     let usage = session.context_usage.get_or_insert(ContextUsage::default());
                     if let Some(tokens) = context_tokens {
                         usage.tokens = tokens;
@@ -557,7 +594,7 @@ impl Waku {
                 self.complete_turn_blocks(session_id);
                 runtime.stream_phase = None;
                 let needs_fallback = !self.turn_has_assistant_message(session_id);
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     session.status = if success {
                         SessionStatus::Idle
                     } else {
@@ -645,7 +682,7 @@ impl Waku {
                         .iter()
                         .find(|session| session.id == session_id)
                         .is_some_and(|session| session.status != SessionStatus::Working);
-                if let Some(session) = self.state.session_mut(session_id)
+                if let Some(session) = self.session_mut_any(session_id)
                     && has_active_turn
                 {
                     if session.status != SessionStatus::Working {
@@ -672,7 +709,7 @@ impl Waku {
                     .last_driver_error
                     .take()
                     .unwrap_or_else(|| tr!("session.codex_exited_before_response"));
-                let should_finish_turn = if let Some(session) = self.state.session_mut(session_id)
+                let should_finish_turn = if let Some(session) = self.session_mut_any(session_id)
                     && matches!(
                         session.status,
                         SessionStatus::Connecting | SessionStatus::Working | SessionStatus::Waiting
@@ -866,6 +903,9 @@ pub(super) fn pop_stream_batch(
     }
 }
 
+/// Test helper: append a text delta to a raw session slice. Production uses
+/// the origin-aware [`Waku::append_text_delta_to_session_any`].
+#[cfg(test)]
 pub(super) fn append_text_delta_to_session(
     sessions: &mut [AgentSession],
     session_id: Uuid,

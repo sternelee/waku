@@ -258,6 +258,8 @@ daemon.iroh_connecting:
   en: Connecting…
 daemon.iroh_connected:
   en: Connected to remote daemon
+daemon.iroh_connected_label:
+  en: "Connected to {label}"
 daemon.iroh_connect_failed:
   en: "Could not connect to remote daemon: {error}"
 daemon.iroh_ticket_missing:
@@ -528,6 +530,18 @@ sidebar.hours_ago:
   en: "%{count}h"
 sidebar.days_ago:
   en: "%{count}d"
+sidebar.remote_sync:
+  en: Allow remote sync & control
+sidebar.remote_group:
+  en: Remote sessions
+sidebar.remote_session_hint:
+  en: Session shared from another machine
+sidebar.remote_sync_hint:
+  en: Share this session with remote Waku clients over iroh P2P so they can see and continue it while it runs.
+sidebar.remote_sync_enabled:
+  en: Remote sync enabled for this session
+sidebar.remote_sync_disabled:
+  en: Remote sync disabled for this session
 sidebar.unknown_project:
   en: Unknown project
 sidebar.close:

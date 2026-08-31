@@ -131,6 +131,7 @@ daemon.iroh_connect_description: 別のマシンのデーモンが公開した�
 daemon.iroh_connect: 接続
 daemon.iroh_connecting: 接続中…
 daemon.iroh_connected: リモートデーモンに接続しました
+daemon.iroh_connected_label: "{label} に接続しました"
 daemon.iroh_connect_failed: "リモートデーモンに接続できません: {error}"
 daemon.iroh_ticket_missing: 先にリモートチケットを貼り付けてください
 daemon.disconnect: 接続を解除
@@ -270,6 +271,12 @@ sidebar.just_now: たった今
 sidebar.minutes_ago: "%{count} 分前"
 sidebar.hours_ago: "%{count} 時間前"
 sidebar.days_ago: "%{count} 日前"
+sidebar.remote_sync: リモート同期と操作を許可
+sidebar.remote_group: リモートセッション
+sidebar.remote_session_hint: 別のマシンから共有されたセッション
+sidebar.remote_sync_hint: このセッションを iroh P2P 経由でリモートの Waku クライアントと共有し、実行中も閲覧・継続できるようにします。
+sidebar.remote_sync_enabled: このセッションのリモート同期を有効にしました
+sidebar.remote_sync_disabled: このセッションのリモート同期を無効にしました
 sidebar.unknown_project: 不明なプロジェクト
 sidebar.close: サイドバーを閉じる
 sidebar.hide: サイドバーを隠す
