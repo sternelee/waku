@@ -1558,6 +1558,7 @@ impl Waku {
             self.task_switcher.remove(id);
         }
         self.remote_sessions.clear();
+        self.remote_projects.clear();
         self.remote_daemon = None;
         self.remote_daemon_label = SharedString::default();
         // Stop auto-reconnecting to the dropped remote on the next launch.

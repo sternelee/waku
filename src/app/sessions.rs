@@ -1157,10 +1157,7 @@ impl Waku {
             return;
         }
         let retain_runtime = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .is_some_and(|session| retain_runtime_after_cancel(session.provider))
             || self.session_has_live_detached_work(session_id);
         // Goal operations queued behind a starting runtime would set the
@@ -1193,10 +1190,7 @@ impl Waku {
         }
         self.pending_queue_drains.retain(|id| *id != session_id);
         let has_active_turn = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .and_then(AgentSession::active_turn_id)
             .is_some();
         let previous_kinds = has_active_turn
@@ -1214,7 +1208,7 @@ impl Waku {
         }
         if has_active_turn {
             let needs_fallback = !self.turn_has_assistant_message(session_id);
-            if let Some(session) = self.state.session_mut(session_id) {
+            if let Some(session) = self.session_mut_any(session_id) {
                 session.status = SessionStatus::Idle;
                 if needs_fallback {
                     session.push_message(MessageRole::Assistant, tr!("session.stopped"));

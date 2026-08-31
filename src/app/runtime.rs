@@ -1036,6 +1036,7 @@ impl Waku {
     fn apply_remote_session_catalog(&mut self, snapshot: RemoteTaskStateSnapshot, cx: &mut Context<Self>) {
         // Preserve hydrated transcripts and locally-tracked runtime state for
         // sessions the remote daemon still lists; the projection is list-only.
+        self.remote_projects = snapshot.projects;
         let runtime_ids = self.runtimes.keys().copied().collect::<HashSet<_>>();
         let removed = merge_remote_session_catalog(
             &mut self.remote_sessions,
@@ -1277,9 +1278,15 @@ impl Waku {
             .projects
             .iter()
             .map(|project| (project.id, project.path.clone()))
+            .chain(
+                self.remote_projects
+                    .iter()
+                    .map(|project| (project.id, project.path.clone())),
+            )
             .collect::<HashMap<_, _>>();
+        let remote = self.session_origin(session_id) == Some(SessionOrigin::Remote);
         let mut checkpoint = None;
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             if !session.status.is_busy() {
                 return;
             }
@@ -1303,6 +1310,7 @@ impl Waku {
                     session_id,
                     turn_count,
                     project_path,
+                    remote,
                 });
             }
             for message in &mut session.messages {
@@ -1449,16 +1457,37 @@ impl Waku {
     /// The directory every filesystem and provider operation for `session`
     /// must use. A not-yet-materialized worktree draft deliberately reads the
     /// local checkout until its first submission creates the isolated copy.
+    /// Remote sessions resolve against the remote daemon's project catalog —
+    /// the paths are remote-host paths, valid only for remote-host git.
     pub(super) fn workspace_path_for_session<'a>(
         &'a self,
         session: &'a AgentSession,
     ) -> Option<&'a std::path::Path> {
-        let project = self
-            .state
-            .projects
+        let projects = match self.session_origin(session.id) {
+            Some(SessionOrigin::Remote) => &self.remote_projects,
+            _ => &self.state.projects,
+        };
+        let project = projects
             .iter()
             .find(|project| project.id == session.project_id)?;
         Some(session.workspace.path().unwrap_or(&project.path))
+    }
+
+    /// A workspace client pointed at whichever daemon owns `session_id`, so
+    /// git-backed operations (checkpoints, checkpoint restore) run on the
+    /// session's own host.
+    pub(super) fn workspace_client_for_session(
+        &self,
+        session_id: Uuid,
+    ) -> waku_client::WorkspaceClient {
+        match self.session_origin(session_id) {
+            Some(SessionOrigin::Remote) => self
+                .remote_daemon
+                .as_ref()
+                .map(|daemon| waku_client::WorkspaceClient::new(daemon.client()))
+                .unwrap_or_else(|| waku_client::WorkspaceClient::new(self.daemon.client())),
+            _ => waku_client::WorkspaceClient::new(self.daemon.client()),
+        }
     }
 
     pub(super) fn selected_workspace_path(&self) -> Option<&std::path::Path> {
@@ -1797,11 +1826,17 @@ impl Waku {
             .remote_sessions
             .iter()
             .filter(|session| dirty.contains(&session.id))
-            .map(AgentSession::list_projection)
+            .cloned()
             .collect::<Vec<_>>();
         if sessions.is_empty() {
             return None;
         }
+        // Push the full session snapshot, not a list projection: the daemon's
+        // merge copies model/traits/mode from the incoming snapshot, and a
+        // projection would erase those fields along with turn checkpoints.
+        // The daemon's `session_projection_precedes` still guards its own
+        // transcript against a stale client view. Flushes only fire on idle
+        // metadata edits, so the client copy is in sync with the daemon's.
         remote
             .client()
             .notify(
@@ -1851,18 +1886,14 @@ impl Waku {
     /// [`Self::start_pending_checkpoint_captures`], which every caller that
     /// holds a `Context` runs straight after queueing.
     pub(super) fn capture_latest_turn_checkpoint_for(&mut self, session_id: Uuid) {
-        let Some((session, turn_count)) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .and_then(|session| {
-                session
-                    .turns
-                    .last()
-                    .filter(|turn| turn.status != TurnStatus::Running)
-                    .map(|turn| (session, turn.turn_count))
-            })
+        let Some(session) = self.selected_session_by_id(session_id) else {
+            return;
+        };
+        let Some(turn_count) = session
+            .turns
+            .last()
+            .filter(|turn| turn.status != TurnStatus::Running)
+            .map(|turn| turn.turn_count)
         else {
             return;
         };
@@ -1875,11 +1906,13 @@ impl Waku {
         else {
             return;
         };
+        let remote = self.session_origin(session_id) == Some(SessionOrigin::Remote);
         self.pending_checkpoint_captures
             .push(PendingCheckpointCapture {
                 session_id,
                 turn_count,
                 project_path,
+                remote,
             });
     }
 
@@ -1896,6 +1929,7 @@ impl Waku {
                 session_id,
                 turn_count,
                 project_path,
+                remote,
             } = request;
             if !self
                 .checkpoint_captures_in_flight
@@ -1903,7 +1937,15 @@ impl Waku {
             {
                 continue;
             }
-            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+            // A shared session's checkpoint runs git on its own daemon host.
+            let workspace = if remote {
+                self.remote_daemon
+                    .as_ref()
+                    .map(|daemon| waku_client::WorkspaceClient::new(daemon.client()))
+            } else {
+                None
+            }
+            .unwrap_or_else(|| waku_client::WorkspaceClient::new(self.daemon.client()));
             cx.spawn(async move |waku, cx| {
                 let captured = cx
                     .background_executor()
@@ -1956,7 +1998,7 @@ impl Waku {
                     };
                     waku.invalidate_checkpoint_refs();
                     let mut attached_turn_id = None;
-                    if let Some(session) = waku.state.session_mut(session_id)
+                    if let Some(session) = waku.session_mut_any(session_id)
                         && let Some(turn) = session
                             .turns
                             .iter_mut()
@@ -2379,10 +2421,8 @@ impl Waku {
         let turn_count = edit.turn_count;
         let retained_turn_count = turn_count.saturating_sub(1);
         let Some(source) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
+            .cloned()
             .filter(|session| {
                 session
                     .turns
@@ -2437,7 +2477,20 @@ impl Waku {
             .runtimes
             .get(&session_id)
             .map(|runtime| runtime.driver.clone());
-        let needs_binary = rollback_turns > 0
+        let remote = self.session_origin(session_id) == Some(SessionOrigin::Remote);
+        // A remote rollback must run through the attached remote driver: the
+        // provider binary and native session live on the remote host, so the
+        // locally-probed binary and local cold-start paths are meaningless.
+        if remote && rollback_turns > 0 && driver.is_none() {
+            self.show_toast(tr!(
+                "session.provider_cannot_rewind",
+                provider = source.provider.display_name()
+            ));
+            cx.notify();
+            return;
+        }
+        let needs_binary = !remote
+            && rollback_turns > 0
             && (matches!(source.provider, ProviderKind::Amp)
                 || (source.provider == ProviderKind::OpenCode && driver.is_none())
                 || (source.provider == ProviderKind::Grok && retained_turn_count > 0));
@@ -2457,7 +2510,8 @@ impl Waku {
             cx.notify();
             return;
         }
-        let driver_start = if rollback_turns > 0
+        let driver_start = if !remote
+            && rollback_turns > 0
             && matches!(
                 source.provider,
                 ProviderKind::Codex
@@ -2502,7 +2556,7 @@ impl Waku {
             return;
         };
         let request = MessageRewindRequest {
-            workspace_client: waku_client::WorkspaceClient::new(self.daemon.client()),
+            workspace_client: self.workspace_client_for_session(session_id),
             session_id,
             provider,
             provider_cursor,
@@ -2524,7 +2578,7 @@ impl Waku {
         // spinner while every Git, process, native transcript, and provider
         // operation runs off the UI thread. Failure restores both the original
         // bubble and this edit input.
-        let original_message = self.state.session_mut(session_id).and_then(|session| {
+        let original_message = self.session_mut_any(session_id).and_then(|session| {
             let message = session
                 .messages
                 .iter_mut()
@@ -2584,10 +2638,11 @@ impl Waku {
             return;
         }
         let selected = self.state.selected_session == Some(session_id);
+        let remote = self.session_origin(session_id) == Some(SessionOrigin::Remote);
         let prepared = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                if let Some(session) = self.state.session_mut(session_id) {
+                if let Some(session) = self.session_mut_any(session_id) {
                     if let Some(message) = session
                         .messages
                         .iter_mut()
@@ -2626,10 +2681,7 @@ impl Waku {
         } = prepared;
         let retained_turn_count = turn_count.saturating_sub(1);
         let provider_and_removed_turns = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
+            .selected_session_by_id(session_id)
             .map(|session| {
                 (
                     session.provider,
@@ -2647,7 +2699,7 @@ impl Waku {
         } else {
             Vec::new()
         };
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             if let Some(fork) = &claude_fork {
                 for turn in session.turns.iter_mut().take(retained_turn_count) {
                     if let Some(remapped) = turn
@@ -2678,7 +2730,21 @@ impl Waku {
         if let Some(prepared) = prepared_driver {
             self.install_prepared_driver(session_id, prepared);
         }
-        if claude_fork.is_some()
+        if remote {
+            // The remote daemon owns the provider process, and its driver has
+            // already applied the rollback/fork. Keep the attached runtime so
+            // the next prompt resumes the rewound thread over iroh.
+            if let Some(runtime) = self.runtimes.get_mut(&session_id) {
+                runtime
+                    .pending_events
+                    .retain(|event| matches!(event, DriverEvent::BackgroundWork(_)));
+                runtime.stream_remeasure_pending = false;
+                runtime.stream_phase = None;
+                runtime.pending_permission = None;
+                runtime.pending_user_input = None;
+                runtime.pending_computer_approval = None;
+            }
+        } else if claude_fork.is_some()
             || reset_native_session
             || (matches!(
                 provider,
@@ -3227,7 +3293,7 @@ impl Waku {
         message_id: Uuid,
         cx: &mut Context<Self>,
     ) {
-        if let Some(session) = self.state.session_mut(session_id) {
+        if let Some(session) = self.session_mut_any(session_id) {
             session
                 .queued_messages
                 .retain(|message| message.id != message_id);
@@ -3245,7 +3311,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(message) = self.state.session_mut(session_id).and_then(|session| {
+        let Some(message) = self.session_mut_any(session_id).and_then(|session| {
             let index = session
                 .queued_messages
                 .iter()
@@ -3271,7 +3337,7 @@ impl Waku {
         message_id: Uuid,
         cx: &mut Context<Self>,
     ) {
-        let Some(message) = self.state.session_mut(session_id).and_then(|session| {
+        let Some(message) = self.session_mut_any(session_id).and_then(|session| {
             let index = session
                 .queued_messages
                 .iter()
@@ -3642,7 +3708,7 @@ impl Waku {
                 } else {
                     Vec::new()
                 };
-                if let Some(session) = self.state.session_mut(session_id)
+                if let Some(session) = self.session_mut_any(session_id)
                     && session.status == SessionStatus::Connecting
                 {
                     // The submission never reached a provider and its prompt

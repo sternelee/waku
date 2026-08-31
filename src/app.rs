@@ -535,7 +535,11 @@ enum RightPanelSurface {
 struct PendingCheckpointCapture {
     session_id: Uuid,
     turn_count: usize,
+    /// The session workspace's checkout on the daemon host that owns it — a
+    /// local path for local sessions, a remote-host path for shared ones.
     project_path: PathBuf,
+    /// Whether the git capture must run on the remote daemon.
+    remote: bool,
 }
 
 /// Sessions between accepting a submission and handing it to a provider.
@@ -1282,6 +1286,10 @@ pub struct Waku {
     remote_daemon: Option<waku_client::DaemonSupervisor>,
     remote_daemon_label: SharedString,
     remote_sessions: Vec<AgentSession>,
+    /// The remote daemon's project catalog. Remote sessions resolve their
+    /// workspace paths against this list, since their projects live on the
+    /// remote host and never appear in the locally-persisted `state.projects`.
+    remote_projects: Vec<Project>,
     /// Remote sessions whose metadata (model, traits, mode) was edited here
     /// and still needs pushing back to the remote daemon. Transcript deltas
     /// are NOT tracked here: the remote daemon owns messages and turns, and
@@ -2164,6 +2172,8 @@ impl Waku {
                     session_id: session.id,
                     turn_count,
                     project_path,
+                    // Startup recovery only sees the local daemon's sessions.
+                    remote: false,
                 });
             }
             for message in &mut session.messages {
@@ -2874,6 +2884,7 @@ impl Waku {
                 remote_daemon: None,
                 remote_daemon_label: SharedString::default(),
                 remote_sessions: Vec::new(),
+                remote_projects: Vec::new(),
                 remote_dirty_sessions: HashSet::new(),
                 remote_task_state_tx,
                 remote_task_state_events,
