@@ -137,8 +137,7 @@ the original feature bullet instead of adding separate entries for them.
   nvm and fnm
 - Show models registered by Pi extensions
 - Fix the model picker closing when entering a space in search
-- Fix duplicate transcript history and lost interaction mode when resuming ACP
-  sessions
+- Fix duplicate transcript history when resuming ACP sessions
 
 ## [0.0.10]
 

@@ -1035,9 +1035,6 @@ impl Waku {
     }
 
     pub(super) fn set_runtime_mode(&mut self, mode: RuntimeMode, cx: &mut Context<Self>) {
-        if mode == RuntimeMode::Plan {
-            return;
-        }
         let Some((session_id, session_changed)) = self
             .selected_session()
             .map(|session| (session.id, session.runtime_mode != mode))
@@ -1053,18 +1050,6 @@ impl Waku {
         }
         if session_changed || remembered_changed {
             self.state.last_runtime_mode = mode;
-            self.save();
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_interaction_mode(&mut self, mode: InteractionMode, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.interaction_mode != mode
-        {
-            let session_id = session.id;
-            session.interaction_mode = mode;
-            self.apply_session_options(session_id, cx);
             self.save();
             cx.notify();
         }
@@ -1131,9 +1116,6 @@ impl Waku {
             && session.agent_preset.as_deref() != Some(agent_preset.as_str())
         {
             let session_id = session.id;
-            if agent_preset == "minimal" {
-                session.interaction_mode = InteractionMode::Build;
-            }
             session.agent_preset = Some(agent_preset);
             // A provider cursor makes a session started, so this is normally a
             // no-op. It also closes the narrow race where a blank runtime was

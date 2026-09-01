@@ -37,7 +37,7 @@ Inputs ([driver/mod.rs:67](../crates/waku-core/src/driver/mod.rs#L79)):
 
 ```rust
 pub struct DriverStartOptions {
-    binary, cwd, mode, interaction_mode,
+    binary, cwd, mode,
     model, reasoning_effort, service_tier,
     computer_use_enabled, provider_cursor,
 }
@@ -94,7 +94,7 @@ the transport absorbed the change or wants to be restarted:
 | Change | Codex | Pi | ACP | OpenCode | Claude | Amp |
 | --- | --- | --- | --- | --- | --- | --- |
 | Model, reasoning effort, service tier | in session — they ride on every `turn/start` | in session — `set_model`, `set_thinking_level` | in session — `session/set_model`, except Fx's advertised `model` config option | in session — the model rides on each prompt | in session — a `set_model` control request | restart — all three are launch arguments |
-| Access mode, interaction mode | restart | restart | restart | restart — the agent is chosen when the session opens | restart | restart |
+| Access mode | restart | restart | restart | restart | restart | restart |
 | Provider | restart | restart | restart | restart | restart | restart |
 
 The permission policy is deliberately excluded even for Codex, which does carry
@@ -161,7 +161,7 @@ OpenCode server itself, whose driver kills it explicitly on drop.
 | Mid-turn steering | yes | yes | yes | yes | yes | yes | **no** | yes | yes | yes (transport) |
 | Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes |
 | Computer Use | yes | yes | no (ships its own) | no | no | no | no | yes | yes | no |
-| Restricted to Build + Full access | no | yes | yes | no | yes | no | no | no | no | no |
+| Restricted to Full access | no | yes | yes | no | yes | no | no | no | no | no |
 | Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** |
 
 Kimi Code's steering is the transport's, not a probed policy: the ACP driver
@@ -325,9 +325,9 @@ both go into the cursor, and resume needs the **file path**, not just the id.
 | `agent_settled` (Pi) / `agent_end` (Oh My Pi) | `TurnFinished`, then resets stream state |
 | `extension_ui_request` | auto-cancelled — Waku has no UI for extension prompts |
 
-**Access modes** — Build + Full access only, enforced at driver start rather
-than degraded silently: any other combination fails with "currently supports
-Build with Full access only" ([pi.rs:209](../crates/waku-core/src/driver/pi.rs#L209)).
+**Access modes** — Full access only, enforced at driver start rather than
+degraded silently: any other selection fails with "currently supports Full
+access only" ([pi.rs:209](../crates/waku-core/src/driver/pi.rs#L209)).
 Pi has no permission system at all, so `--approve` is the whole story. Oh My Pi
 *does* have one, which Waku's `--yolo` then bypasses — the restriction is Waku's
 here, not the CLI's, and lifting it is a matter of wiring Oh My Pi's permission
@@ -518,8 +518,8 @@ and payloads here were read off a live server's OpenAPI document, not guessed.
 
 **Lifetime** — long-lived: one server per session runtime.
 
-**Handshake** — `POST /session` for a fresh session (or reuse the resume
-cursor's id), then `POST /session/{id}/agent` to pick `plan` or `build`.
+**Handshake** — `POST /session` with OpenCode's standard `build` agent for a
+fresh session, or reuse the resume cursor's id.
 
 **Per turn** — `POST /session/{id}/prompt_async` with
 `{parts: [{type: "text", …}]}`, which acknowledges with `204 No Content` as
@@ -593,11 +593,10 @@ advertised capability the client cannot honor strands the agent mid-tool-call;
 Cursor alone receives its `_meta.parameterizedModelPicker` opt-in) →
 `session/resume` when resuming and the agent advertises it (so history is not
 replayed), otherwise a replay-suppressed `session/load` when it reports
-`loadSession`, else `session/new` → optional `session/set_mode`. A restore the
-agent no longer recognizes falls back to a fresh session rather than stranding
-the task. Mode selection is applied after both new and restored sessions. Kimi
-Code advertises both, so it takes the first rung — `session/resume`, verified
-against a session left by an earlier process.
+`loadSession`, else `session/new` → optional `session/set_mode` for Fx's access
+policy. A restore the agent no longer recognizes falls back to a fresh session
+rather than stranding the task. Kimi Code advertises both, so it takes the first
+rung — `session/resume`, verified against a session left by an earlier process.
 
 Cursor's picker opt-in makes `session/new`, `session/load`, and
 `session/resume` return provider-owned `configOptions`. Waku resolves the CLI's
@@ -698,24 +697,19 @@ editor, which tracks unsaved buffers
 reading a file the user has unsaved edits in currently gets the disk copy. That
 is a deliberate future call, not an oversight.
 
-**Modes** — Plan maps to the agent's own `plan` mode via `session/set_mode` when
-it advertises one; Cursor offers `agent`, `plan` and `ask`, Kimi Code offers
-`default`, `plan`, `auto` and `yolo`. Fx offers only `ask` and `code`, so Waku
-disables Plan for Fx, maps Supervised to `ask`, and maps the auto modes to
-`code`. Every other access mode is Waku's to
-enforce: the agent stays in the mode that asks, and `auto_approve` decides
-whether Waku answers `session/request_permission` on the user's behalf. That is
-why Kimi is left in `default` rather than being switched to `auto` or `yolo` —
-the permission traffic is the feature, not an obstacle. Supervised deliberately
-stays in `agent` mode: ACP's read-only `ask` mode *answers
-questions* instead of asking permission, whereas Supervised means the agent still
-acts, it just checks first — which is what `session/request_permission` already
-does.
+**Access modes** — Fx exposes native `ask` and `code` modes, so Waku maps
+Supervised to `ask` and the auto modes to `code`. Every other ACP agent stays in
+its ordinary execution mode, and `auto_approve` decides whether Waku answers
+`session/request_permission` on the user's behalf. That is why Kimi is left in
+`default` rather than switched to `auto` or `yolo`: the permission traffic is
+the feature, not an obstacle. A legacy session still reporting the removed
+read-only setting is returned to the agent's advertised `agent` or `default`
+mode when it attaches.
 
 **Model and reasoning effort** — `session/set_model` after the session opens,
 then the effort as a session config option. **The config id is the agent's to
 name**, and the two disagree: Waku sends `mode` by default, but Kimi's `mode` is
-its permission mode (`default`/`plan`/`auto`/`yolo`) and its effort lives on
+its permission mode and its effort lives on
 `thinking`. `reasoning_effort_config_id` resolves that per provider — sending
 the default id to Kimi would silently set nothing, or worse, move the permission
 mode. The call is non-fatal either way, since an agent may expose no effort at
@@ -783,19 +777,17 @@ which its `--print` transport did not emit at all.
 
 ## Access modes across providers
 
-Waku's `InteractionMode` (Build / Plan) and `RuntimeMode` (Supervised /
-Auto-accept edits / Auto / Full access) collapse into each CLI's own vocabulary.
-Plan always wins over the access mode.
+Waku's `RuntimeMode` (Supervised / Auto-accept edits / Auto / Full access)
+maps into each CLI's own vocabulary.
 
 | Waku | Codex (`approvalPolicy` / `sandbox` / reviewer) | Claude `--permission-mode` | Cursor | Fx | OpenCode | Grok | Kimi Code |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Plan | `never` / `read-only` / `user` | `plan` | `session/set_mode` → `plan` | unsupported; control disabled | `agent: plan` | `session/set_mode` → `plan` | `session/set_mode` → `plan` |
 | Supervised | `untrusted` / `read-only` / `user` | `default` + `can_use_tool` reaches the user | `session/request_permission` reaches the user | `session/set_mode` → `ask` | permission requests reach the user | `session/request_permission` reaches the user | `session/request_permission` reaches the user |
 | Auto-accept edits | `on-request` / `workspace-write` / `user` | `acceptEdits` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
 | Auto | `on-request` / `workspace-write` / `auto_review` | `auto` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
 | Full access | `never` / `danger-full-access` / `user` | `bypassPermissions` + `--dangerously-skip-permissions` | auto-answered | `session/set_mode` → `code` | auto-answered (`always`) | auto-answered | auto-answered |
 
-Amp, Pi, and Oh My Pi accept Build + Full access only and always run wide open
+Amp, Pi, and Oh My Pi accept Full access only and always run wide open
 (`--dangerously-allow-all`, `--approve`, `--yolo`).
 
 Every provider except those three distinguishes Supervised from the auto modes
@@ -906,7 +898,7 @@ transcript uuid as a rewind checkpoint.
    turn; Amp queues it unless it carries the CLI's `"steer": true` attribute;
    ACP agents take a second `session/prompt` whose superseded predecessor must
    not settle the turn — and only a live probe tells these apart.
-5. Map the access and interaction modes. If the transport can ask the user, route
+5. Map the access modes. If the transport can ask the user, route
    Supervised to a real `Permission` event; if it cannot, pick the safe
    degradation and say so in a comment at the call site.
 6. Add an `#[ignore]`d integration test that drives the real provider through the

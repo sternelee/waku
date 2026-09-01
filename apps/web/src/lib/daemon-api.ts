@@ -643,7 +643,6 @@ export function createSession(
     provider,
     model: null,
     runtime_mode: 'fullAccess',
-    interaction_mode: 'build',
     reasoning_effort: null,
     service_tier: null,
     context_window: null,

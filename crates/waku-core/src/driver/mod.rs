@@ -21,8 +21,8 @@ use crossbeam_channel::{Receiver, SendError, Sender, unbounded};
 
 use crate::computer_use::ComputerToolRequest;
 use crate::model::{
-    BackgroundWorkKey, DriverEvent, GoalOperation, InteractionMode, ProviderKind,
-    ProviderResumeCursor, RuntimeMode, UserInputAnswer,
+    BackgroundWorkKey, DriverEvent, GoalOperation, ProviderKind, ProviderResumeCursor, RuntimeMode,
+    UserInputAnswer,
 };
 
 /// Provider events remain synchronous to send from reader threads, while the
@@ -184,7 +184,6 @@ pub struct DriverStartOptions {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -200,7 +199,6 @@ pub struct DriverStartOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,

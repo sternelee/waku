@@ -6,8 +6,8 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, SendError, Sender, unbounded};
 use waku_protocol::computer_use::ComputerToolRequest;
 use waku_protocol::model::{
-    BackgroundWorkKey, DriverEvent, GoalOperation, InteractionMode, ProviderResumeCursor,
-    RuntimeMode, UserInputAnswer,
+    BackgroundWorkKey, DriverEvent, GoalOperation, ProviderResumeCursor, RuntimeMode,
+    UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -137,7 +137,6 @@ pub struct DriverStartOptions {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
@@ -150,7 +149,6 @@ pub struct DriverStartOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
     pub mode: RuntimeMode,
-    pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,

@@ -23,7 +23,7 @@ use super::{activity, computer_use as computer_use_runtime};
 use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
-use crate::model::{ActivityKind, DriverEvent, InteractionMode, ProviderResumeCursor, RuntimeMode};
+use crate::model::{ActivityKind, DriverEvent, ProviderResumeCursor, RuntimeMode};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -197,7 +197,6 @@ impl PiDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier: _,
@@ -206,9 +205,9 @@ impl PiDriver {
             computer_use_enabled,
             provider_cursor,
         } = options;
-        if mode != RuntimeMode::FullAccess || interaction_mode != InteractionMode::Build {
+        if mode != RuntimeMode::FullAccess {
             return Err(anyhow!(
-                "{} currently supports Build with Full access only",
+                "{} currently supports Full access only",
                 flavor.display_name()
             ));
         }
@@ -735,11 +734,9 @@ impl DriverControl for PiDriver {
     fn apply_options(&self, options: SessionOptions) -> bool {
         // Both flavors have setters for the model and thinking level, so those
         // apply to the live session. Neither exposes one for permissions — and
-        // Waku only runs them in Build with Full access anyway — so a mode
-        // change asks for a fresh start, which is where that is reported.
-        if options.mode != RuntimeMode::FullAccess
-            || options.interaction_mode != InteractionMode::Build
-        {
+        // Waku only runs them with Full access anyway, so a mode change asks
+        // for a fresh start, which is where that is reported.
+        if options.mode != RuntimeMode::FullAccess {
             return false;
         }
         self.commands.send(CommandMessage::Options(options)).is_ok()
@@ -1497,7 +1494,6 @@ mod tests {
                 binary,
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
@@ -1559,24 +1555,22 @@ mod tests {
             commands,
             computer_use: None,
         };
-        let options = |mode, interaction_mode| SessionOptions {
+        let options = |mode| SessionOptions {
             mode,
-            interaction_mode,
             model: Some("anthropic/claude-opus-5".to_owned()),
             reasoning_effort: Some("high".to_owned()),
             service_tier: None,
             context_window: None,
         };
 
-        assert!(driver.apply_options(options(RuntimeMode::FullAccess, InteractionMode::Build)));
+        assert!(driver.apply_options(options(RuntimeMode::FullAccess)));
         assert!(matches!(
             command_rx.try_recv(),
             Ok(CommandMessage::Options(_))
         ));
 
-        // Pi has no permission setter, and only runs Build with Full access.
-        assert!(!driver.apply_options(options(RuntimeMode::Ask, InteractionMode::Build)));
-        assert!(!driver.apply_options(options(RuntimeMode::FullAccess, InteractionMode::Plan)));
+        // Pi has no permission setter and only runs with Full access.
+        assert!(!driver.apply_options(options(RuntimeMode::Ask)));
         assert!(command_rx.try_recv().is_err());
     }
 
@@ -1747,7 +1741,6 @@ mod tests {
                 binary,
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,

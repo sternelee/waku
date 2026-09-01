@@ -29,8 +29,8 @@ use crate::driver::{
     DriverControl, DriverEventSender, DriverEventSink, DriverStartOptions, SessionOptions,
 };
 use crate::model::{
-    ActivityKind, DriverEvent, InteractionMode, PermissionOption, ProviderResumeCursor,
-    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion,
+    ActivityKind, DriverEvent, PermissionOption, ProviderResumeCursor, RuntimeMode,
+    UserInputAnswer, UserInputOption, UserInputQuestion,
 };
 use crate::opencode_pool::PooledServer;
 use crate::opencode_session::{
@@ -65,8 +65,7 @@ fn prompt_body(text: &str, model: Option<&str>, agent: &str) -> Value {
     body
 }
 
-fn opencode_permission_rules(mode: RuntimeMode, interaction_mode: InteractionMode) -> Value {
-    let plan = interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan;
+fn opencode_permission_rules(mode: RuntimeMode) -> Value {
     let rule = |permission: &str, action: &str| {
         json!({
             "permission": permission,
@@ -76,22 +75,9 @@ fn opencode_permission_rules(mode: RuntimeMode, interaction_mode: InteractionMod
     };
 
     match mode {
-        RuntimeMode::Plan | RuntimeMode::Ask => {
-            let mut rules = vec![rule("bash", "ask")];
-            if !plan {
-                rules.push(rule("edit", "ask"));
-            }
-            Value::Array(rules)
-        }
+        RuntimeMode::Ask => Value::Array(vec![rule("bash", "ask"), rule("edit", "ask")]),
         RuntimeMode::AutoAcceptEdits => {
-            let mut rules = vec![rule("bash", "ask")];
-            if !plan {
-                rules.push(rule("edit", "allow"));
-            }
-            Value::Array(rules)
-        }
-        RuntimeMode::Auto | RuntimeMode::FullAccess if plan => {
-            Value::Array(vec![rule("bash", "allow")])
+            Value::Array(vec![rule("bash", "ask"), rule("edit", "allow")])
         }
         RuntimeMode::Auto | RuntimeMode::FullAccess => Value::Array(vec![rule("*", "allow")]),
     }
@@ -106,7 +92,6 @@ pub struct OpenCodeDriver {
     permissions: Arc<Mutex<OpenCodePermissionState>>,
     event_stream: Arc<OpenCodeEventStreamControl>,
     mode: RuntimeMode,
-    interaction_mode: InteractionMode,
     computer_use: Option<super::support::HeadlessComputerUseRuntime>,
 }
 
@@ -116,7 +101,6 @@ impl OpenCodeDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort: _,
             service_tier: _,
@@ -163,11 +147,7 @@ impl OpenCodeDriver {
             crate::opencode_pool::acquire(&binary, &cwd)?
         };
 
-        let agent = if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
-            "plan"
-        } else {
-            "build"
-        };
+        let agent = "build";
 
         // Reuse the native session when resuming so the conversation, and the
         // cursor already persisted for it, stay the same.
@@ -195,7 +175,7 @@ impl OpenCodeDriver {
                 "PATCH",
                 &format!("/session/{}", encode_path_segment(&session_id)),
                 Some(&json!({
-                    "permission": opencode_permission_rules(mode, interaction_mode)
+                    "permission": opencode_permission_rules(mode)
                 })),
             )
             .context("could not configure OpenCode session permissions")?;
@@ -528,7 +508,6 @@ impl OpenCodeDriver {
             permissions,
             event_stream,
             mode,
-            interaction_mode,
             computer_use,
         })
     }
@@ -576,9 +555,9 @@ impl DriverControl for OpenCodeDriver {
     }
 
     fn apply_options(&self, options: SessionOptions) -> bool {
-        // The model rides on each prompt, but access and agent selection are
-        // installed when the driver starts, so changing either restarts it.
-        options.mode == self.mode && options.interaction_mode == self.interaction_mode
+        // The model rides on each prompt, but access is installed when the
+        // driver starts, so changing it restarts the driver.
+        options.mode == self.mode
     }
 
     fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
@@ -1353,10 +1332,10 @@ mod tests {
             prompt_body(
                 "Inspect the failure",
                 Some("opencode-go/deepseek-v4-flash"),
-                "plan",
+                "build",
             ),
             json!({
-                "agent": "plan",
+                "agent": "build",
                 "model": {
                     "providerID": "opencode-go",
                     "modelID": "deepseek-v4-flash",
@@ -1377,24 +1356,16 @@ mod tests {
         };
 
         assert_eq!(
-            opencode_permission_rules(RuntimeMode::Ask, InteractionMode::Build),
+            opencode_permission_rules(RuntimeMode::Ask),
             json!([rule("bash", "ask"), rule("edit", "ask")])
         );
         assert_eq!(
-            opencode_permission_rules(RuntimeMode::AutoAcceptEdits, InteractionMode::Build),
+            opencode_permission_rules(RuntimeMode::AutoAcceptEdits),
             json!([rule("bash", "ask"), rule("edit", "allow")])
         );
         assert_eq!(
-            opencode_permission_rules(RuntimeMode::Ask, InteractionMode::Plan),
-            json!([rule("bash", "ask")])
-        );
-        assert_eq!(
-            opencode_permission_rules(RuntimeMode::FullAccess, InteractionMode::Build),
+            opencode_permission_rules(RuntimeMode::FullAccess),
             json!([rule("*", "allow")])
-        );
-        assert_eq!(
-            opencode_permission_rules(RuntimeMode::FullAccess, InteractionMode::Plan),
-            json!([rule("bash", "allow")])
         );
     }
 
@@ -1445,7 +1416,6 @@ mod tests {
                 binary,
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,
@@ -1534,7 +1504,6 @@ mod tests {
                 binary,
                 cwd: std::env::temp_dir(),
                 mode: RuntimeMode::FullAccess,
-                interaction_mode: InteractionMode::Build,
                 model: None,
                 reasoning_effort: None,
                 service_tier: None,

@@ -23,9 +23,9 @@ use crate::driver::{
 };
 use crate::model::{
     ActivityItem, ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
-    BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, GoalOperation, InteractionMode,
-    PermissionOption, ProviderResumeCursor, RuntimeMode, ThreadGoal, ThreadGoalStatus,
-    UserInputAnswer, UserInputOption, UserInputQuestion, unix_time_millis,
+    BackgroundWorkKind, BackgroundWorkStatus, DriverEvent, GoalOperation, PermissionOption,
+    ProviderResumeCursor, RuntimeMode, ThreadGoal, ThreadGoalStatus, UserInputAnswer,
+    UserInputOption, UserInputQuestion, unix_time_millis,
 };
 
 const DISABLE_EXTERNAL_COMPUTER_USE_PLUGIN: &str =
@@ -130,7 +130,6 @@ impl BackgroundRpcState {
 pub struct CodexDriver {
     commands: Sender<CommandMessage>,
     mode: RuntimeMode,
-    interaction_mode: InteractionMode,
     computer_use_process_directory: Option<PathBuf>,
     computer_use_server_path: Option<PathBuf>,
     computer_use_preview_monitor: Option<computer_use_runtime::ComputerUsePreviewMonitor>,
@@ -209,7 +208,6 @@ impl CodexDriver {
             binary,
             cwd,
             mode,
-            interaction_mode,
             model,
             reasoning_effort,
             service_tier,
@@ -366,8 +364,7 @@ impl CodexDriver {
                 // one of those is a new value here rather than a new process.
                 // The permission policy is deliberately not in that set — see
                 // `apply_options`.
-                let (approval_policy, sandbox, approvals_reviewer) =
-                    codex_permissions(mode, interaction_mode);
+                let (approval_policy, sandbox, approvals_reviewer) = codex_permissions(mode);
                 let mut model = model;
                 let mut reasoning_effort = reasoning_effort;
                 let mut service_tier = service_tier;
@@ -882,7 +879,6 @@ impl CodexDriver {
         Ok(Self {
             commands,
             mode,
-            interaction_mode,
             computer_use_process_directory,
             computer_use_server_path,
             computer_use_preview_monitor,
@@ -890,19 +886,12 @@ impl CodexDriver {
     }
 }
 
-fn codex_permissions(
-    mode: RuntimeMode,
-    interaction_mode: InteractionMode,
-) -> (&'static str, &'static str, &'static str) {
-    if interaction_mode == InteractionMode::Plan || mode == RuntimeMode::Plan {
-        return ("never", "read-only", "user");
-    }
+fn codex_permissions(mode: RuntimeMode) -> (&'static str, &'static str, &'static str) {
     match mode {
         RuntimeMode::Ask => ("untrusted", "read-only", "user"),
         RuntimeMode::AutoAcceptEdits => ("on-request", "workspace-write", "user"),
         RuntimeMode::Auto => ("on-request", "workspace-write", "auto_review"),
         RuntimeMode::FullAccess => ("never", "danger-full-access", "user"),
-        RuntimeMode::Plan => unreachable!("handled above"),
     }
 }
 
@@ -1072,7 +1061,7 @@ impl DriverControl for CodexDriver {
         // same way even though they are also per-turn fields: loosening or
         // tightening what an already-running agent may touch deserves a fresh
         // thread, so a mode change asks to be restarted instead.
-        if options.mode != self.mode || options.interaction_mode != self.interaction_mode {
+        if options.mode != self.mode {
             return false;
         }
         self.commands.send(CommandMessage::Options(options)).is_ok()
@@ -2812,35 +2801,26 @@ mod tests {
     #[test]
     fn access_modes_match_codex_permission_profiles() {
         assert_eq!(
-            codex_permissions(RuntimeMode::Ask, InteractionMode::Build),
+            codex_permissions(RuntimeMode::Ask),
             ("untrusted", "read-only", "user")
         );
         assert_eq!(
-            codex_permissions(RuntimeMode::AutoAcceptEdits, InteractionMode::Build),
+            codex_permissions(RuntimeMode::AutoAcceptEdits),
             ("on-request", "workspace-write", "user")
         );
         assert_eq!(
-            codex_permissions(RuntimeMode::Auto, InteractionMode::Build),
+            codex_permissions(RuntimeMode::Auto),
             ("on-request", "workspace-write", "auto_review")
         );
         assert_eq!(
-            codex_permissions(RuntimeMode::FullAccess, InteractionMode::Build),
+            codex_permissions(RuntimeMode::FullAccess),
             ("never", "danger-full-access", "user")
-        );
-        assert_eq!(
-            codex_permissions(RuntimeMode::FullAccess, InteractionMode::Plan),
-            ("never", "read-only", "user")
         );
     }
 
-    fn session_options(
-        mode: RuntimeMode,
-        interaction_mode: InteractionMode,
-        model: &str,
-    ) -> SessionOptions {
+    fn session_options(mode: RuntimeMode, model: &str) -> SessionOptions {
         SessionOptions {
             mode,
-            interaction_mode,
             model: Some(model.to_owned()),
             reasoning_effort: None,
             service_tier: None,
@@ -2854,33 +2834,19 @@ mod tests {
         let driver = CodexDriver {
             commands,
             mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Build,
             computer_use_process_directory: None,
             computer_use_server_path: None,
             computer_use_preview_monitor: None,
         };
 
-        assert!(driver.apply_options(session_options(
-            RuntimeMode::FullAccess,
-            InteractionMode::Build,
-            "gpt-5-codex"
-        )));
+        assert!(driver.apply_options(session_options(RuntimeMode::FullAccess, "gpt-5-codex")));
         assert!(matches!(
             command_rx.try_recv(),
             Ok(CommandMessage::Options(_))
         ));
 
-        // Both of these change the sandbox the running thread was opened with.
-        assert!(!driver.apply_options(session_options(
-            RuntimeMode::FullAccess,
-            InteractionMode::Plan,
-            "gpt-5-codex"
-        )));
-        assert!(!driver.apply_options(session_options(
-            RuntimeMode::Ask,
-            InteractionMode::Build,
-            "gpt-5-codex"
-        )));
+        // This changes the sandbox the running thread was opened with.
+        assert!(!driver.apply_options(session_options(RuntimeMode::Ask, "gpt-5-codex")));
         assert!(command_rx.try_recv().is_err());
     }
 

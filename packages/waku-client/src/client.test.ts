@@ -26,6 +26,17 @@ class FakeSocket implements WebSocketLike {
     this.readyState = 3;
   }
 
+  emitClose(): void {
+    this.readyState = 3;
+    this.emit("close", { reason: "" });
+  }
+
+  fail(reason: string): void {
+    this.readyState = 3;
+    this.emit("error", {});
+    this.emit("close", { reason });
+  }
+
   open(): void {
     this.readyState = 1;
     this.emit("open");
@@ -66,6 +77,23 @@ async function connect(client: WakuClient, sockets: FakeSocket[]): Promise<FakeS
 }
 
 describe("WakuClient", () => {
+  test("reports connection state changes, including remote closure", async () => {
+    const { client, sockets } = fixture();
+    const states: string[] = [];
+    const unsubscribe = client.subscribeConnectionState((state) => states.push(state));
+
+    const connected = client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await connected;
+    socket.close();
+    socket.emitClose();
+    unsubscribe();
+
+    expect(states).toEqual(["disconnected", "connecting", "connected", "disconnected"]);
+  });
+
   test("authenticates and correlates typed responses", async () => {
     const { client, sockets } = fixture();
     const connected = client.connect();
@@ -154,6 +182,15 @@ describe("WakuClient", () => {
     second.open();
     second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await expect(secondConnection).resolves.toBeUndefined();
+  });
+
+  test("surfaces the native socket failure reason", async () => {
+    const { client, sockets } = fixture();
+    const connection = client.connect();
+
+    sockets[0]!.fail("The network connection was lost");
+
+    await expect(connection).rejects.toThrow("The network connection was lost");
   });
 
   test("accepts sequence one again when the daemon epoch changes", async () => {

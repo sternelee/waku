@@ -1609,7 +1609,6 @@ impl Waku {
         let selected_mode = self
             .selected_session()
             .map(|session| session.runtime_mode)
-            .filter(|mode| *mode != RuntimeMode::Plan)
             .unwrap_or_default();
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle("runtime-mode", cx);
@@ -1796,80 +1795,6 @@ impl Waku {
                     .collect()
             },
         ))
-    }
-
-    pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::current(cx);
-        let mode = self
-            .selected_session()
-            .map(|session| session.interaction_mode)
-            .unwrap_or_default();
-        let selected_session = self.selected_session();
-        let supports_plan = selected_session.is_none_or(|session| {
-            session.provider != ProviderKind::Fx
-                && (session.provider != ProviderKind::DeepSeek
-                    || self.agent_preset_for_session(session).as_deref() != Some("minimal"))
-        });
-        // A stale state can still be switched back to Build; providers without
-        // a plan capability cannot be toggled from Build into one.
-        let interactive = mode == InteractionMode::Plan || supports_plan;
-        let plan_unavailable_message = selected_session
-            .filter(|session| session.provider == ProviderKind::Fx)
-            .map_or_else(
-                || tr!("agent_preset.minimal_no_plan"),
-                |_| tr!("mode.plan_not_supported"),
-            );
-        let next_mode = if mode == InteractionMode::Plan {
-            InteractionMode::Build
-        } else {
-            InteractionMode::Plan
-        };
-        let weak = cx.entity().downgrade();
-        div()
-            .id("interaction-mode")
-            .h(px(24.0))
-            .px(px(7.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_default()
-            .text_size(sp(12.5))
-            .line_height(sp(14.0))
-            .text_color(if mode == InteractionMode::Plan {
-                theme.accent
-            } else {
-                theme.text_secondary
-            })
-            .child(icon(
-                if mode == InteractionMode::Plan {
-                    "icons/list.svg"
-                } else {
-                    "icons/wrench.svg"
-                },
-                10.5,
-                if mode == InteractionMode::Plan {
-                    theme.accent
-                } else {
-                    theme.text_tertiary
-                },
-            ))
-            .child(mode.label())
-            .when(interactive, |element| {
-                element
-                    .hover(|element| element.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.set_interaction_mode(next_mode, cx);
-                        });
-                    })
-            })
-            .when(!interactive, |element| {
-                element
-                    .opacity(0.7)
-                    .tooltip(Tooltip::text(plan_unavailable_message))
-            })
-            .into_any_element()
     }
 
     /// The thread-goal chip: present only while the provider reports a goal,
@@ -2802,7 +2727,6 @@ impl Waku {
                         .children(self.render_model_traits_control(cx))
                         .children(self.render_agent_preset_control(cx))
                         .child(self.render_access_control(cx))
-                        .child(self.render_interaction_mode_control(cx))
                         .children(self.render_goal_control(cx))
                         .child(div().flex_1())
                         .child(match submit_action {

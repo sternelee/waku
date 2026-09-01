@@ -30,8 +30,8 @@ use crate::computer_use::ComputerAppGrant;
 use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
-    AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
-    ProviderKind, RuntimeMode, SessionWorkspace,
+    AgentSession, FavoriteModel, Message, MessageAttachment, MessageRole, Project, ProviderKind,
+    RuntimeMode, SessionWorkspace,
 };
 use crate::theme::ThemePreference;
 pub use waku_protocol::persistence::{
@@ -1214,7 +1214,6 @@ impl StateStore {
         session.workspace = stored.workspace;
         session.provider_cursor = stored.provider_cursor;
         session.runtime_mode = stored.runtime_mode;
-        session.interaction_mode = stored.interaction_mode;
         session.reasoning_effort = stored.reasoning_effort;
         session.service_tier = stored.service_tier;
         session.context_window = stored.context_window;
@@ -1500,7 +1499,6 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         model,
         // Hydration replaces these; the list never reads them.
         runtime_mode: RuntimeMode::default(),
-        interaction_mode: InteractionMode::default(),
         remote_sync_enabled,
         reasoning_effort: None,
         service_tier: None,

@@ -274,16 +274,34 @@ impl ProviderResumeCursor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeMode {
-    /// Legacy combined mode. State migration moves this to `interaction_mode`.
-    Plan,
+    /// Older state files used `plan` as a combined read-only mode. Keep those
+    /// sessions readable without retaining it as a product mode.
     Ask,
     AutoAcceptEdits,
     Auto,
     #[default]
     FullAccess,
+}
+
+impl<'de> Deserialize<'de> for RuntimeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "plan" | "ask" => Ok(Self::Ask),
+            "autoAcceptEdits" => Ok(Self::AutoAcceptEdits),
+            "auto" => Ok(Self::Auto),
+            "fullAccess" => Ok(Self::FullAccess),
+            other => Err(<D::Error as serde::de::Error>::unknown_variant(
+                other,
+                &["ask", "autoAcceptEdits", "auto", "fullAccess"],
+            )),
+        }
+    }
 }
 
 impl RuntimeMode {
@@ -296,7 +314,6 @@ impl RuntimeMode {
 
     pub fn label(self) -> String {
         match self {
-            Self::Plan => tr!("mode.plan"),
             Self::Ask => tr!("mode.supervised"),
             Self::AutoAcceptEdits => tr!("mode.auto_accept_edits"),
             Self::Auto => tr!("mode.auto"),
@@ -306,7 +323,6 @@ impl RuntimeMode {
 
     pub fn description(self) -> String {
         match self {
-            Self::Plan => tr!("mode.plan_description"),
             Self::Ask => tr!("mode.supervised_description"),
             Self::AutoAcceptEdits => tr!("mode.auto_accept_edits_description"),
             Self::Auto => tr!("mode.auto_description"),
@@ -316,27 +332,10 @@ impl RuntimeMode {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Plan | Self::Ask => "icons/lock.svg",
+            Self::Ask => "icons/lock.svg",
             Self::AutoAcceptEdits => "icons/pencil.svg",
             Self::Auto => "icons/sparkle.svg",
             Self::FullAccess => "icons/lock-open.svg",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum InteractionMode {
-    #[default]
-    Build,
-    Plan,
-}
-
-impl InteractionMode {
-    pub fn label(self) -> String {
-        match self {
-            Self::Build => tr!("mode.build"),
-            Self::Plan => tr!("mode.plan"),
         }
     }
 }
@@ -400,9 +399,8 @@ pub struct FavoriteModel {
 
 /// One provider-owned agent composition available when a task starts.
 ///
-/// DeepSeek Harness calls these agent presets. They are intentionally kept
-/// separate from [`InteractionMode`]: a preset chooses the tools and prompt
-/// composition, while Build/Plan controls what that composition should do.
+/// DeepSeek Harness calls these agent presets. A preset chooses the tools and
+/// prompt composition for a session.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct ProviderAgentPreset {
     pub id: String,
@@ -919,8 +917,6 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub runtime_mode: RuntimeMode,
-    #[serde(default)]
-    pub interaction_mode: InteractionMode,
     /// Whether remote Waku clients connected over iroh P2P may see this
     /// session, attach to its runtime, and continue it. Sessions default to
     /// local-only; the owning desktop flips this per session.
@@ -934,8 +930,8 @@ pub struct AgentSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<String>,
     /// Provider-owned agent composition selected before the first turn.
-    /// Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
-    /// locks this value once conversation history exists.
+    /// Currently populated by DeepSeek Harness, which locks this value once
+    /// conversation history exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_preset: Option<String>,
     pub status: SessionStatus,
@@ -1008,7 +1004,6 @@ impl AgentSession {
             provider,
             model: None,
             runtime_mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Build,
             remote_sync_enabled: false,
             reasoning_effort: None,
             service_tier: None,
@@ -1047,7 +1042,6 @@ impl AgentSession {
             provider: self.provider,
             model: self.model.clone(),
             runtime_mode: RuntimeMode::default(),
-            interaction_mode: InteractionMode::default(),
             remote_sync_enabled: self.remote_sync_enabled,
             reasoning_effort: None,
             service_tier: None,
@@ -1169,10 +1163,6 @@ impl AgentSession {
     }
 
     pub fn migrate_legacy_state(&mut self) {
-        if self.runtime_mode == RuntimeMode::Plan {
-            self.runtime_mode = RuntimeMode::Ask;
-            self.interaction_mode = InteractionMode::Plan;
-        }
         if self.provider_cursor.is_none()
             && let Some(id) = self.provider_session_id.take()
         {
@@ -3383,6 +3373,14 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_plan_access_mode_loads_as_supervised() {
+        let mode: RuntimeMode = serde_json::from_str(r#""plan""#).unwrap();
+
+        assert_eq!(mode, RuntimeMode::Ask);
+        assert_eq!(serde_json::to_string(&mode).unwrap(), r#""ask""#);
+    }
 
     #[test]
     fn background_work_snapshots_have_serializable_named_items() {

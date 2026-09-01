@@ -120,7 +120,6 @@ fn start_runtime(client: &DaemonClient, session: &AgentSession) -> anyhow::Resul
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_default(),
                 mode: encode_enum(session.runtime_mode)?,
-                interaction_mode: encode_enum(session.interaction_mode)?,
                 model: session.model.clone(),
                 reasoning_effort: session.reasoning_effort.clone(),
                 service_tier: session.service_tier.clone(),

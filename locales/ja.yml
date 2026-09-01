@@ -440,19 +440,14 @@ activity.plan_steps: プランのステップ
 activity.tool_call: ツール呼び出し
 activity.tool_calls: ツール呼び出し
 
-mode.build: 実装
-mode.plan: プラン
 mode.supervised: 監督モード
 mode.auto_accept_edits: 編集を自動承認
 mode.auto: 自動
 mode.full_access: フルアクセス
-mode.plan_description: 変更を加えずに調査してプランを作成します
-mode.plan_not_supported: このエージェントはプランモードに対応していません
 mode.supervised_description: コマンドの実行とファイル変更の前に確認します
 mode.auto_accept_edits_description: 編集は自動承認し、その他の操作は事前に確認します
 mode.auto_description: 通常の操作は AI レビュアーが承認し、リスクのある操作は事前に確認します
 mode.full_access_description: 確認なしでコマンドの実行と編集を許可します
-mode.switch_to: "%{mode}に切り替える"
 
 agent_preset.standard: 標準モード
 agent_preset.code: コードモード
@@ -464,7 +459,6 @@ agent_preset.minimal_description: 永続 bash と str_replace_editor の二つ�
 agent_preset.creator_description: カスタムエージェントプリセットの作成向けです。標準モードの全機能に加え、ランタイム検査、プラグイン実験、プリセット作成ガイドを備えます。
 agent_preset.custom: カスタム
 agent_preset.no_description: 説明はありません。
-agent_preset.minimal_no_plan: ミニマルモードにはプラン機能がありません
 
 computer_use.allow_for_task: このタスクで許可
 computer_use.always_allow_app: このアプリを常に許可

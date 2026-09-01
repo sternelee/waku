@@ -861,10 +861,6 @@ activity.tool_call:
 activity.tool_calls:
   en: tool calls
 
-mode.build:
-  en: Build
-mode.plan:
-  en: Plan
 mode.supervised:
   en: Supervised
 mode.auto_accept_edits:
@@ -873,8 +869,6 @@ mode.auto:
   en: Auto
 mode.full_access:
   en: Full access
-mode.plan_description:
-  en: Inspect and plan without making changes
 mode.supervised_description:
   en: Ask before commands and file changes
 mode.auto_accept_edits_description:
@@ -883,11 +877,6 @@ mode.auto_description:
   en: An AI reviewer approves routine actions; risky ones still ask
 mode.full_access_description:
   en: Allow commands and edits without prompts
-mode.switch_to:
-  en: Switch to %{mode}
-mode.plan_not_supported:
-  en: This agent does not support Plan
-
 agent_preset.standard:
   en: Standard mode
 agent_preset.code:
@@ -908,9 +897,6 @@ agent_preset.custom:
   en: Custom
 agent_preset.no_description:
   en: No description.
-agent_preset.minimal_no_plan:
-  en: Minimal mode does not include Plan
-
 computer_use.allow_for_task:
   en: Allow for task
 computer_use.always_allow_app:

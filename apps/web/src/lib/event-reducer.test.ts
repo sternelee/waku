@@ -266,7 +266,6 @@ function runningSession(): AgentSession {
     workspace: { kind: 'local' },
     provider: 'codex',
     runtime_mode: 'fullAccess',
-    interaction_mode: 'build',
     status: 'connecting',
     created_at: 100,
     updated_at: 100,

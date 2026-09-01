@@ -809,7 +809,6 @@ export function Composer({
               onPatch={savePatch}
             />
             <AccessControl returnFocus={composerInput} session={session} onPatch={savePatch} />
-            <InteractionModeControl session={session} onPatch={savePatch} />
             <GoalControl
               busy={busy}
               session={session}
@@ -1506,10 +1505,7 @@ function AgentPresetControl({
         label: `${agentPresetLabel(preset, t)}${preset.is_custom ? ` · ${t('agent_preset.custom')}` : ''}`,
         description: agentPresetDescription(preset, t) ?? t('agent_preset.no_description'),
         selected: preset.id === selected?.id,
-        onSelect: () => onPatch({
-          agent_preset: preset.id,
-          ...(preset.id === 'minimal' ? { interaction_mode: 'build' as const } : {}),
-        }),
+        onSelect: () => onPatch({ agent_preset: preset.id }),
       }))}
       label={selected ? agentPresetLabel(selected, t) : t('agent_preset.standard')}
       menuClassName="w-80"
@@ -1519,7 +1515,7 @@ function AgentPresetControl({
 }
 
 const ACCESS_MODES: Array<{
-  id: Exclude<AgentSession['runtime_mode'], 'plan'>
+  id: AgentSession['runtime_mode']
   labelKey: string
   descriptionKey: string
   icon: 'lock' | 'pencil' | 'sparkle' | 'lockOpen'
@@ -1540,8 +1536,7 @@ function AccessControl({
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  const selectedId = session.runtime_mode === 'plan' ? 'ask' : session.runtime_mode
-  const selected = ACCESS_MODES.find((mode) => mode.id === selectedId) ?? ACCESS_MODES[3]!
+  const selected = ACCESS_MODES.find((mode) => mode.id === session.runtime_mode) ?? ACCESS_MODES[3]!
   return (
     <ControlMenu
       caret={false}
@@ -1558,41 +1553,6 @@ function AccessControl({
       menuClassName="w-[304px]"
       returnFocus={returnFocus}
     />
-  )
-}
-
-function InteractionModeControl({
-  session,
-  onPatch,
-}: {
-  session: AgentSession
-  onPatch: (patch: Partial<AgentSession>) => void
-}) {
-  const { t } = useI18n()
-  const plan = session.interaction_mode === 'plan'
-  const minimal = session.provider === 'deepSeek' && session.agent_preset === 'minimal'
-  const supportsPlan = session.provider !== 'fx' && !minimal
-  const interactive = plan || supportsPlan
-  return (
-    <button
-      aria-label={t('mode.switch_to', { mode: t(plan ? 'mode.build' : 'mode.plan') })}
-      className={cn(
-        'flex h-6 shrink-0 items-center gap-1.5 rounded-md px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none focus-visible:ring-1 focus-visible:ring-ring',
-        plan && 'text-ring',
-        interactive ? 'hover:bg-accent' : 'opacity-50',
-      )}
-      disabled={!interactive}
-      title={
-        !interactive
-          ? t(session.provider === 'fx' ? 'mode.plan_not_supported' : 'agent_preset.minimal_no_plan')
-          : undefined
-      }
-      type="button"
-      onClick={() => onPatch({ interaction_mode: plan ? 'build' : 'plan' })}
-    >
-      <WakuIcon className={cn('size-[10.5px] text-[var(--text-tertiary)]', plan && 'text-ring')} name={plan ? 'list' : 'wrench'} />
-      {t(plan ? 'mode.plan' : 'mode.build')}
-    </button>
   )
 }
 
