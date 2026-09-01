@@ -7,8 +7,13 @@ import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.View;
+import android.view.inputmethod.EditorInfo;
+import android.widget.EditText;
 
 import androidx.core.splashscreen.SplashScreen;
 
@@ -34,6 +39,15 @@ public class GpuiActivity extends NativeActivity {
 
     /** Whether the native .so has been loaded via System.loadLibrary. */
     private static volatile boolean sNativeLibLoaded = false;
+
+    /**
+     * IME target: a hidden EditText that receives the soft keyboard's
+     * `commitText` calls. NativeActivity has no InputConnection, so paste
+     * (which many keyboards deliver as one commitText, not key events)
+     * would otherwise be lost. The committed text is forwarded to the
+     * native side via {@link #nativeCommitText(String)}.
+     */
+    private EditText mImeTarget;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,7 +84,48 @@ public class GpuiActivity extends NativeActivity {
         // rather than the ringer/notification volume.
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
+        sInstance = this;
         super.onCreate(savedInstanceState);
+
+        // Hidden IME target so the soft keyboard's paste / autocorrect
+        // (delivered as commitText) reaches the native text input callback.
+        // It is added to the window (off-screen) so it can hold IME focus;
+        // NativeActivity itself cannot serve an InputConnection.
+        mImeTarget = new EditText(this);
+        mImeTarget.setVisibility(View.INVISIBLE);
+        mImeTarget.setFocusable(true);
+        mImeTarget.setFocusableInTouchMode(true);
+        mImeTarget.setSingleLine(true);
+        mImeTarget.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        mImeTarget.setRawInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        mImeTarget.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                if (s.length() > 0) {
+                    String committed = s.toString();
+                    // Clear immediately so the next paste isn't diffed.
+                    mImeTarget.setText("");
+                    Log.i("GpuiActivity", "IME commitText: " + committed.length() + " chars");
+                    try {
+                        nativeCommitText(committed);
+                    } catch (UnsatisfiedLinkError e) {
+                        Log.w("GpuiActivity", "nativeCommitText not available");
+                    }
+                }
+            }
+        });
+        // Position it off-screen so it never paints over the GPUI surface.
+        android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(
+                1, 1, android.view.Gravity.TOP | android.view.Gravity.START);
+        lp.leftMargin = -10;
+        lp.topMargin = -10;
+        addContentView(mImeTarget, lp);
     }
 
     /**
@@ -165,4 +220,24 @@ public class GpuiActivity extends NativeActivity {
      * JNI bridge to notify Rust of an incoming deeplink URL.
      */
     private static native void nativeOnDeepLink(String url);
+
+    /**
+     * JNI bridge to forward full-text IME commits (paste, autocorrect) to
+     * the Rust text input callback.
+     */
+    private static native void nativeCommitText(String text);
+
+    /**
+     * Called from Rust before showing the soft keyboard: focus the hidden
+     * IME target so the IME's `onCreateInputConnection` / commitText path
+     * is active.
+     */
+    public static void requestImeFocus() {
+        GpuiActivity activity = sInstance;
+        if (activity != null && activity.mImeTarget != null) {
+            activity.mImeTarget.requestFocus();
+        }
+    }
+
+    private static volatile GpuiActivity sInstance;
 }

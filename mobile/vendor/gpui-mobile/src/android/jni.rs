@@ -1213,6 +1213,23 @@ pub fn set_system_chrome(style: &crate::SystemChromeStyle) {
 pub fn show_keyboard_android(_keyboard_type: crate::KeyboardType) {
     if let Some(app) = android_app() {
         log::info!("show_keyboard_android: using NDK show_soft_input");
+
+        // Focus the activity's hidden EditText so the IME's
+        // `onCreateInputConnection` path is active — that is what lets
+        // paste / autocorrect arrive as `commitText` instead of being lost.
+        let _ = with_env(|env| {
+            if let Ok(activity_class) = find_app_class(env, "dev.waku.mobile.GpuiActivity") {
+                let _ = env.call_static_method(
+                    &activity_class,
+                    jni::jni_str!("requestImeFocus"),
+                    jni::jni_sig!("()V"),
+                    &[],
+                );
+                env.exception_clear();
+            }
+            Ok(())
+        });
+
         app.show_soft_input(false);
     }
 }
@@ -1281,6 +1298,32 @@ pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeOnDeepLink(
         {
             crate::packages::deeplink::notify_deep_link(&url_string);
         }
+        Ok(())
+    });
+}
+
+/// JNI bridge: receive full-text commits from the IME (soft keyboard
+/// paste, autocorrect, handwriting). The native `on_key_event` path only
+/// sees individual hardware-style key presses, which many keyboards do not
+/// emit for a paste — the text arrives here in one `commitText` call.
+///
+/// # Safety
+/// Must only be called from the JVM on a valid JNI thread with a valid `text` jobject.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeCommitText(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    text: *mut std::ffi::c_void,
+) {
+    let text_raw = text as jni::sys::jobject;
+    let _ = with_env(|env| {
+        let text_obj = unsafe { JObject::from_raw(env, text_raw) };
+        let text_string = get_string(env, &text_obj);
+        if text_string.is_empty() {
+            return Ok(());
+        }
+        // Deliver through the same global callback the key-event path uses.
+        crate::dispatch_text_input(&text_string);
         Ok(())
     });
 }

@@ -75,15 +75,6 @@ pub fn render_connect_screen(
         .flex_col()
         .flex_1()
         .overflow_y_scroll()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                if this.active_field == FieldTarget::Ticket {
-                    hide_keyboard();
-                    cx.notify();
-                }
-            }),
-        )
         .child(
             div()
                 .flex()
@@ -127,6 +118,14 @@ pub fn render_connect_screen(
                                 cx.notify();
                             }),
                         )
+                        .on_mouse_down_out(cx.listener(
+                            |this, _event: &MouseDownEvent, _window, cx| {
+                                if this.active_field == FieldTarget::Ticket {
+                                    hide_keyboard();
+                                    cx.notify();
+                                }
+                            },
+                        ))
                         .child(if ticket.is_empty() {
                             div()
                                 .text_color(rgb(0x6B7280))
