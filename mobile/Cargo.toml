@@ -1,0 +1,64 @@
+# Waku Mobile — native iOS/Android client for a Waku daemon host
+#
+# This is deliberately a SEPARATE Cargo workspace from the repository root:
+# gpui-mobile builds against upstream zed `gpui` while the desktop app builds
+# against the egoist/zed fork (waku-webview branch). Cargo cannot unify two
+# different sources of the same semver package, so the mobile app resolves its
+# own dependency graph and lockfile here.
+[package]
+name = "waku-mobile"
+version = "0.1.0"
+edition = "2024"
+description = "Waku remote client for iOS and Android"
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+name = "waku_mobile"
+crate-type = ["cdylib", "staticlib", "lib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "waku-mobile"
+path = "src/main.rs"
+
+[dependencies]
+# Vendored fork of gpui-mobile (upstream rev 1d3ec2a1) with a startup
+# re-entrancy fix in the iOS active-status notification. Upstream's
+# `notify_active_status_change` uses `borrow_mut`, which panics when the
+# launch sequence fires willEnterForeground + didBecomeActive back-to-back
+# while the callback is mid-dispatch.
+gpui-mobile = { path = "vendor/gpui-mobile" }
+# Same rev gpui-mobile builds against, so the two unify into one package.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "5688167d224b5eca54875d49afb8bfd73a07915a", default-features = false }
+# Transport + protocol only: no gpui, no filesystem assumptions. The mobile
+# app is a pure remote client — it never runs providers or touches Git.
+waku-client = { path = "../crates/waku-client" }
+anyhow = "1"
+serde_json = "1"
+crossbeam-channel = "0.5"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"
+android-activity = { version = "0.6", features = ["native-activity"] }
+
+# gpui-mobile needs Zed's patched async-task; patches only apply from the
+# workspace root, so replicate what gpui-mobile's example pins here.
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true

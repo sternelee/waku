@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+
+# Xcode
+ios/build/
+ios/*.xcodeproj/
+ios/DerivedData/
+
+# Android
+android/gradle/build/
+android/gradle/.gradle/
+android/gradle/.kotlin/
+android/gradle/local.properties
+android/gradle/app/build/
+android/gradle/app/src/main/jniLibs/
+
+# macOS
+.DS_Store

@@ -12,6 +12,10 @@ members = [
     "crates/waku-daemon",
     "crates/waku-protocol",
 ]
+# The mobile app is its own Cargo workspace: gpui-mobile builds against
+# upstream zed `gpui`, which cannot be unified with the egoist/zed fork the
+# desktop app pins. It lives at mobile/ with its own lockfile.
+exclude = ["mobile"]
 default-members = [
     ".",
     "crates/waku-client",
