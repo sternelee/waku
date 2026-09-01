@@ -2,7 +2,7 @@ use super::Notification;
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiNotifications";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiNotifications";
 
 pub fn initialize() -> Result<(), String> {
     jni_helpers::with_env(|env| {

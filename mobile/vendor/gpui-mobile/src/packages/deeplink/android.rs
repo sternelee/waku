@@ -2,7 +2,7 @@ use crate::android::jni::{self as jni_helpers, get_string};
 use jni::objects::JValue;
 use std::sync::Mutex;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiDeepLink";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiDeepLink";
 
 static LATEST_LINK: Mutex<Option<String>> = Mutex::new(None);
 

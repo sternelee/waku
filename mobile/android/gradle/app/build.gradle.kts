@@ -83,6 +83,15 @@ android {
                 "*/x86_64/libwaku_mobile.so",
                 "*/x86/libwaku_mobile.so"
             )
+            // `libwaku_mobile.so` statically embeds gpui-mobile and iroh, so
+            // their cdylib siblings (copied by cargo-ndk) are redundant and
+            // would bloat the APK by hundreds of MB.
+            excludes += listOf(
+                "**/libgpui_mobile.so",
+                "**/libgpui_mobile-*.so",
+                "**/libiroh*.so",
+                "**/libiroh_relay*.so"
+            )
         }
     }
 

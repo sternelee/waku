@@ -2,7 +2,7 @@ use super::VideoInfo;
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::{JObject, JValue};
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiVideoPlayer";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiVideoPlayer";
 
 /// Create a new MediaPlayer on the Java side and return its ID.
 pub fn create_player() -> Result<u32, String> {

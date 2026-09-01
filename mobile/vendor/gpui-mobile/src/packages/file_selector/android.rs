@@ -2,7 +2,7 @@ use super::{OpenFileOptions, SaveFileOptions, SelectedFile};
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::{JObject, JValue};
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiFilePicker";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiFilePicker";
 
 pub fn open_file(options: &OpenFileOptions) -> Result<Option<SelectedFile>, String> {
     let mime_types = build_mime_string(options);

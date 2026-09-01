@@ -2,7 +2,7 @@ use super::{AuthResult, BiometricType};
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiLocalAuth";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiLocalAuth";
 
 pub fn is_device_supported() -> Result<bool, String> {
     jni_helpers::with_env(|env| {

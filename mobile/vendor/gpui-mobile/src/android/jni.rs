@@ -171,7 +171,7 @@ impl<T> JniExt<T> for jni::errors::Result<T> {
 /// which doesn't know about application classes.  This helper uses the
 /// Activity's classloader via `activity.getClass().getClassLoader().loadClass(name)`.
 ///
-/// `class_name` uses Java dot notation (e.g. `"dev.gpui.mobile.GpuiHelper"`).
+/// `class_name` uses Java dot notation (e.g. `"dev.waku.mobile.GpuiHelper"`).
 pub fn find_app_class<'local>(
     env: &mut jni::Env<'local>,
     class_name: &str,
@@ -196,7 +196,7 @@ pub fn find_app_class<'local>(
             msg
         })?;
 
-    // classLoader.loadClass("dev.gpui.mobile.GpuiHelper")
+    // classLoader.loadClass("dev.waku.mobile.GpuiHelper")
     let jname = env.new_string(class_name).e()?;
     let loaded = env
         .call_method(
@@ -807,7 +807,7 @@ pub fn run_event_loop(app: &AndroidApp) {
 /// Pause all platform views when the app goes to background.
 fn pause_platform_views() {
     let _ = with_env(|env| {
-        if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
+        if let Ok(helper_class) = find_app_class(env, "dev.waku.mobile.GpuiPlatformView") {
             let _ = env.call_static_method(
                 &helper_class,
                 jni::jni_str!("pauseAll"),
@@ -823,7 +823,7 @@ fn pause_platform_views() {
 /// Resume all platform views when the app returns to foreground.
 fn resume_platform_views() {
     let _ = with_env(|env| {
-        if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
+        if let Ok(helper_class) = find_app_class(env, "dev.waku.mobile.GpuiPlatformView") {
             let _ = env.call_static_method(
                 &helper_class,
                 jni::jni_str!("resumeAll"),
@@ -839,7 +839,7 @@ fn resume_platform_views() {
 /// Dispose all platform views during app shutdown.
 fn dispose_all_platform_views() {
     let _ = with_env(|env| {
-        if let Ok(helper_class) = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView") {
+        if let Ok(helper_class) = find_app_class(env, "dev.waku.mobile.GpuiPlatformView") {
             let _ = env.call_static_method(
                 &helper_class,
                 jni::jni_str!("disposeAll"),
@@ -1240,7 +1240,7 @@ pub fn hide_keyboard_android() {
 /// # Safety
 /// Must only be called from the JVM on a valid JNI thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiActivity_nativeIsInitialized(
+pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeIsInitialized(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
 ) -> u8 {
@@ -1260,7 +1260,7 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiActivity_nativeIsInitialized(
 /// # Safety
 /// Must only be called from the JVM on a valid JNI thread with a valid `url` jobject.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiActivity_nativeOnDeepLink(
+pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeOnDeepLink(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
     url: *mut std::ffi::c_void,
@@ -1293,7 +1293,7 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiActivity_nativeOnDeepLink(
 /// Must only be called from the JVM on a valid JNI thread with a valid `action` jobject.
 #[cfg(feature = "media_session")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiMediaSession_nativeMediaAction(
+pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiMediaSession_nativeMediaAction(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
     action: *mut std::ffi::c_void,
@@ -1327,7 +1327,7 @@ pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiMediaSession_nativeMediaAction
 /// Must only be called from the JVM on a valid JNI thread.
 #[cfg(feature = "media_session")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiMediaSession_nativeMediaSeek(
+pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiMediaSession_nativeMediaSeek(
     _env: *mut std::ffi::c_void,
     _class: *mut std::ffi::c_void,
     position_ms: i64,

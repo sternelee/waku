@@ -2,7 +2,7 @@ use super::{LoopMode, PlayerState};
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiAudio";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiAudio";
 
 pub fn create() -> Result<u32, String> {
     jni_helpers::with_env(|env| {

@@ -2,7 +2,7 @@ use super::{Calendar, CalendarEvent};
 use crate::android::jni::{self as jni_helpers, get_string, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiCalendar";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiCalendar";
 
 pub fn get_calendars() -> Result<Vec<Calendar>, String> {
     jni_helpers::with_env(|env| {

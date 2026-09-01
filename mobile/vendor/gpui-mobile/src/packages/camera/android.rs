@@ -5,7 +5,7 @@ use super::{
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::{JObject, JValue};
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiCamera";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiCamera";
 
 pub fn available_cameras() -> Result<Vec<CameraDescription>, String> {
     jni_helpers::with_env(|env| {

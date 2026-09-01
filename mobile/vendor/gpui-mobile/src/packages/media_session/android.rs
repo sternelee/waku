@@ -1,7 +1,7 @@
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiMediaSession";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiMediaSession";
 
 pub fn init() -> Result<(), String> {
     jni_helpers::with_env(|env| {

@@ -2,7 +2,7 @@ use super::WebViewHandle;
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiHelper";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiHelper";
 
 pub fn evaluate_javascript(handle: &WebViewHandle, script: &str) -> Result<(), String> {
     if handle.platform_handle.is_none() {

@@ -53,7 +53,7 @@ impl AndroidPlatformView {
         use jni::objects::JValue;
 
         with_env(|env| {
-            let helper_class = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView")?;
+            let helper_class = find_app_class(env, "dev.waku.mobile.GpuiPlatformView")?;
             let view_type_jstr = env.new_string(&self.view_type).map_err(|e| e.to_string())?;
             let view_id = self.id.0 as i64;
 
@@ -119,7 +119,7 @@ impl AndroidPlatformView {
 
         let view_id = self.id.0 as i64;
         let _ = with_env(|env| {
-            let helper_class = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView")?;
+            let helper_class = find_app_class(env, "dev.waku.mobile.GpuiPlatformView")?;
             let _ = env
                 .call_static_method(
                     &helper_class,
@@ -148,7 +148,7 @@ impl AndroidPlatformView {
 
         let view_id = self.id.0 as i64;
         let _ = with_env(|env| {
-            let helper_class = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView")?;
+            let helper_class = find_app_class(env, "dev.waku.mobile.GpuiPlatformView")?;
             let _ = env
                 .call_static_method(
                     &helper_class,
@@ -171,7 +171,7 @@ impl AndroidPlatformView {
 
         let view_id = self.id.0 as i64;
         let _ = with_env(|env| {
-            let helper_class = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView")?;
+            let helper_class = find_app_class(env, "dev.waku.mobile.GpuiPlatformView")?;
             let _ = env
                 .call_static_method(
                     &helper_class,
@@ -221,7 +221,7 @@ impl PlatformView for AndroidPlatformView {
 
         let view_id = self.id.0 as i64;
         let _ = with_env(|env| {
-            let helper_class = find_app_class(env, "dev.gpui.mobile.GpuiPlatformView")?;
+            let helper_class = find_app_class(env, "dev.waku.mobile.GpuiPlatformView")?;
             let _ = env
                 .call_static_method(
                     &helper_class,

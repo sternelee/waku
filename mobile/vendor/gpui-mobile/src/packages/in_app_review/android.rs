@@ -1,7 +1,7 @@
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiInAppReview";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiInAppReview";
 
 pub fn is_available() -> Result<bool, String> {
     jni_helpers::with_env(|env| {

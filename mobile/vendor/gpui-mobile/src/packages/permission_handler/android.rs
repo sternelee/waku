@@ -2,7 +2,7 @@ use super::*;
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiPermissions";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiPermissions";
 
 /// Android manifest permission strings for each Permission variant.
 fn permission_to_android_string(permission: Permission) -> &'static str {

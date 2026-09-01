@@ -2,7 +2,7 @@ use super::{LocationAccuracy, LocationSettings, Position};
 use crate::android::jni::{self as jni_helpers};
 use jni::objects::JValue;
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiLocation";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiLocation";
 
 pub fn is_location_service_enabled() -> Result<bool, String> {
     jni_helpers::with_env(|env| {

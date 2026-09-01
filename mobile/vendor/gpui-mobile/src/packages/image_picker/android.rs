@@ -2,7 +2,7 @@ use super::{CameraDevice, ImagePickerOptions, ImageSource, PickedFile};
 use crate::android::jni::{self as jni_helpers, JniExt};
 use jni::objects::{JObject, JValue};
 
-const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiImagePicker";
+const HELPER_CLASS: &str = "dev.waku.mobile.GpuiImagePicker";
 
 pub fn pick_image(options: &ImagePickerOptions) -> Result<Option<PickedFile>, String> {
     jni_helpers::with_env(|env| {
