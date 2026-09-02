@@ -92,8 +92,39 @@ public class GpuiActivity extends NativeActivity {
         // (delivered as commitText) reaches the native text input callback.
         // It is added to the window (off-screen) so it can hold IME focus;
         // NativeActivity itself cannot serve an InputConnection.
-        mImeTarget = new EditText(this);
-        mImeTarget.setVisibility(View.INVISIBLE);
+        mImeTarget = new EditText(this) {
+            @Override
+            public android.view.inputmethod.InputConnection onCreateInputConnection(
+                    EditorInfo outAttrs) {
+                android.view.inputmethod.InputConnection base = super.onCreateInputConnection(outAttrs);
+                if (base == null) {
+                    return null;
+                }
+                // Intercept commitText: a soft-keyboard paste (and
+                // autocorrect) arrives here instead of via key events, and
+                // must be forwarded to native as text input.
+                return new android.view.inputmethod.InputConnectionWrapper(base, true) {
+                    @Override
+                    public boolean commitText(CharSequence text, int newCursorPosition) {
+                        if (text != null && text.length() > 0) {
+                            Log.i("GpuiActivity", "IME commitText: " + text.length() + " chars");
+                            try {
+                                nativeCommitText(text.toString());
+                            } catch (Throwable t) {
+                                Log.e("GpuiActivity", "nativeCommitText failed", t);
+                            }
+                        }
+                        return true; // consumed; don't also insert into EditText
+                    }
+                };
+            }
+        };
+        // The IME target must stay VISIBLE for Android to route
+        // commitText (paste/autocorrect) to it — an INVISIBLE view is
+        // ignored by InputMethodManager. It's placed off-screen
+        // (-10,-10) and backgroundless so the user never sees it.
+        mImeTarget.setVisibility(View.VISIBLE);
+        mImeTarget.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         mImeTarget.setFocusable(true);
         mImeTarget.setFocusableInTouchMode(true);
         mImeTarget.setSingleLine(true);
@@ -108,16 +139,12 @@ public class GpuiActivity extends NativeActivity {
 
             @Override
             public void afterTextChanged(Editable s) {
+                // commitText is already forwarded by the
+                // InputConnectionWrapper above; just keep the hidden
+                // EditText empty so the next paste starts clean. This also
+                // catches any input path that mutated the text directly.
                 if (s.length() > 0) {
-                    String committed = s.toString();
-                    // Clear immediately so the next paste isn't diffed.
                     mImeTarget.setText("");
-                    Log.i("GpuiActivity", "IME commitText: " + committed.length() + " chars");
-                    try {
-                        nativeCommitText(committed);
-                    } catch (UnsatisfiedLinkError e) {
-                        Log.w("GpuiActivity", "nativeCommitText not available");
-                    }
                 }
             }
         });
@@ -252,7 +279,12 @@ public class GpuiActivity extends NativeActivity {
      */
     public static void requestImeFocus() {
         GpuiActivity activity = sInstance;
-        if (activity != null && activity.mImeTarget != null) {
+        if (activity == null || activity.mImeTarget == null) {
+            return;
+        }
+        // View/IME operations must run on the UI thread; this JNI entry is
+        // called from the native thread (touch + keyboard), so hop over.
+        activity.runOnUiThread(() -> {
             boolean focused = activity.mImeTarget.requestFocus();
             Log.i("GpuiActivity", "requestImeFocus: focused=" + focused
                     + " hasFocus=" + activity.mImeTarget.hasFocus()
@@ -264,9 +296,8 @@ public class GpuiActivity extends NativeActivity {
                             activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
             if (imm != null) {
                 imm.showSoftInput(activity.mImeTarget, 0);
-                Log.i("GpuiActivity", "requestImeFocus: showSoftInput(EditText) called");
             }
-        }
+        });
     }
 
     private static volatile GpuiActivity sInstance;
