@@ -126,6 +126,38 @@ pub fn render_connect_screen(
                             div().child(truncate_ticket(&ticket))
                         }),
                 )
+                // Paste button — reads the clipboard directly. Reliable on
+                // NativeActivity where IME commitText (soft-keyboard paste)
+                // delivery is vendor-dependent and often dropped.
+                .child(
+                    div()
+                        .id("paste-ticket")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .h(px(40.0))
+                        .w_full()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x2E3038))
+                        .text_sm()
+                        .text_color(rgb(theme.on_surface_variant))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                                let text = gpui_mobile::get_clipboard_text();
+                                let trimmed = text.trim();
+                                if !trimmed.is_empty() {
+                                    this.ticket_input = trimmed.to_owned();
+                                    this.active_field = FieldTarget::Ticket;
+                                    this.error = None;
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        .child("📋 从剪贴板粘贴"),
+                )
                 .child({
                     primary_button(button_label, disabled).on_mouse_down(
                         MouseButton::Left,

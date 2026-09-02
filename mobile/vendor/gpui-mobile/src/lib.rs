@@ -269,6 +269,24 @@ pub fn hide_keyboard() {
     {}
 }
 
+/// Read the clipboard as plain text. On Android this goes through the
+/// activity's ClipboardManager; on iOS it uses UIPasteboard. Returns an
+/// empty string when there is no text clip or on unsupported platforms.
+pub fn get_clipboard_text() -> String {
+    #[cfg(target_os = "android")]
+    {
+        return android::jni::get_clipboard_text_android();
+    }
+    #[cfg(target_os = "ios")]
+    {
+        return ios::ffi::get_clipboard_text_ios();
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        String::new()
+    }
+}
+
 // ── Keyboard height ─────────────────────────────────────────────────────────
 
 use std::sync::atomic::AtomicU32;

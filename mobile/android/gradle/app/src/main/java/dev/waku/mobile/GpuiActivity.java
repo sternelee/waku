@@ -269,10 +269,29 @@ public class GpuiActivity extends NativeActivity {
     private static native void nativeCommitText(String text);
 
     /**
-     * Called from Rust before showing the soft keyboard: focus the hidden
-     * IME target so the IME's `onCreateInputConnection` / commitText path
-     * is active.
+     * Read the clipboard as plain text. Called from Rust when the user
+     * explicitly pastes (paste button / long-press), which is reliable on
+     * NativeActivity where IME commitText delivery is vendor-dependent.
      */
+    public static String getClipboardText() {
+        GpuiActivity activity = sInstance;
+        if (activity == null) {
+            return "";
+        }
+        android.content.ClipboardManager cm =
+                (android.content.ClipboardManager)
+                        activity.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+        if (cm == null || !cm.hasPrimaryClip()) {
+            return "";
+        }
+        android.content.ClipData clip = cm.getPrimaryClip();
+        if (clip == null || clip.getItemCount() == 0) {
+            return "";
+        }
+        CharSequence text = clip.getItemAt(0).coerceToText(activity);
+        return text == null ? "" : text.toString();
+    }
+
     /**
      * Called from Rust before showing the soft keyboard: focus the hidden
      * IME target so the IME's commitText path is active.
@@ -290,11 +309,14 @@ public class GpuiActivity extends NativeActivity {
                     + " hasFocus=" + activity.mImeTarget.hasFocus()
                     + " curFocus=" + activity.getWindow().getCurrentFocus());
             // Bind the IME to the EditText explicitly, not to the native
-            // surface's (empty) InputConnection.
+            // surface's (empty) InputConnection. restartInput forces the
+            // IME to (re)bind the EditText's onCreateInputConnection, and
+            // showSoftInput anchors the IME session to it.
             android.view.inputmethod.InputMethodManager imm =
                     (android.view.inputmethod.InputMethodManager)
                             activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
             if (imm != null) {
+                imm.restartInput(activity.mImeTarget);
                 imm.showSoftInput(activity.mImeTarget, 0);
             }
         });

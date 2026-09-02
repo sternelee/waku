@@ -497,6 +497,27 @@ pub extern "C" fn gpui_ios_run_demo() {
     run_app();
 }
 
+/// Read the clipboard (UIPasteboard) as plain text.
+pub fn get_clipboard_text_ios() -> String {
+    use objc2::runtime::AnyClass;
+    use objc2_foundation::NSString;
+    unsafe {
+        let Some(cls) = AnyClass::get(c"UIPasteboard") else {
+            return String::new();
+        };
+        let pasteboard: *mut objc2::runtime::AnyObject =
+            objc2::msg_send![cls, generalPasteboard];
+        if pasteboard.is_null() {
+            return String::new();
+        }
+        let text: *mut NSString = objc2::msg_send![pasteboard, string];
+        if text.is_null() {
+            return String::new();
+        }
+        (*text).to_string()
+    }
+}
+
 /// Run the GPUI iOS application.
 ///
 /// This initialises the platform, creates the `Application`, and enters the

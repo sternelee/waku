@@ -1210,6 +1210,46 @@ pub fn set_system_chrome(style: &crate::SystemChromeStyle) {
 /// The NDK function handles the UI-thread dispatch internally.
 ///
 /// Text input arrives via `KeyEvent`s through `process_input_events()`.
+/// Read the clipboard as plain text via the activity. Returns an empty
+/// string when there's no text clip. Used by the mobile paste button /
+/// long-press — reliable on NativeActivity where IME commitText delivery
+/// is vendor-dependent.
+pub fn get_clipboard_text_android() -> String {
+    let result = with_env(|env| {
+        match find_app_class(env, "dev.waku.mobile.GpuiActivity") {
+            Ok(activity_class) => {
+                match env.call_static_method(
+                    &activity_class,
+                    jni::jni_str!("getClipboardText"),
+                    jni::jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                ) {
+                    Ok(value) => {
+                        env.exception_clear();
+                        let obj = value.l().unwrap_or_default();
+                        let text: String = if obj.is_null() {
+                            String::new()
+                        } else {
+                            get_string(env, &obj)
+                        };
+                        Ok(text)
+                    }
+                    Err(e) => {
+                        env.exception_clear();
+                        log::warn!("get_clipboard_text_android: call failed: {e:?}");
+                        Ok(String::new())
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("get_clipboard_text_android: find_app_class failed: {e}");
+                Err(e)
+            }
+        }
+    });
+    result.unwrap_or_default()
+}
+
 /// Focus the activity's hidden IME EditText so the soft keyboard's
 /// commitText (paste, autocorrect) path is active. NativeActivity touches
 /// bypass Activity.dispatchTouchEvent, so this must be re-asserted from
