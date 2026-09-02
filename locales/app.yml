@@ -244,6 +244,10 @@ daemon.iroh_status_disabled:
   en: Disabled
 daemon.iroh_ticket:
   en: Ticket
+daemon.show_qr:
+  en: QR code
+daemon.hide_qr:
+  en: Hide QR
 daemon.iroh_ticket_unavailable:
   en: Restart the daemon to generate a ticket
 daemon.iroh_ticket_placeholder:

@@ -1250,6 +1250,32 @@ pub fn get_clipboard_text_android() -> String {
     result.unwrap_or_default()
 }
 
+/// Launch the platform QR scanner via the activity. The scanned text is
+/// delivered back through nativeCommitText → dispatch_text_input.
+pub fn start_qr_scan_android() {
+    let _ = with_env(|env| {
+        match find_app_class(env, "dev.waku.mobile.GpuiActivity") {
+            Ok(activity_class) => {
+                let result = env.call_static_method(
+                    &activity_class,
+                    jni::jni_str!("startQrScan"),
+                    jni::jni_sig!("()V"),
+                    &[],
+                );
+                env.exception_clear();
+                if result.is_err() {
+                    log::warn!("start_qr_scan_android: startQrScan failed: {result:?}");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("start_qr_scan_android: find_app_class failed: {e}");
+                Err(e)
+            }
+        }
+    });
+}
+
 /// Focus the activity's hidden IME EditText and (when `show_keyboard`)
 /// pop the soft keyboard anchored to it. Focusing and showing both happen
 /// on the UI thread inside the activity, so the IME binds the EditText's

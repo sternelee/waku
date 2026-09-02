@@ -81,6 +81,8 @@ block2 = "0.6"
 # Matches the version GPUI itself renders with, so RenderImage frames are the
 # same `image` types.
 image = "0.25"
+# QR code generation for sharing the daemon ticket as a scannable code.
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGImage",

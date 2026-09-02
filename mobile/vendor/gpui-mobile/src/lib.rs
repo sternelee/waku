@@ -287,6 +287,16 @@ pub fn get_clipboard_text() -> String {
     }
 }
 
+/// Launch a QR/barcode scanner. The result is delivered back through the
+/// text-input path (dispatch_text_input) so it fills the focused field.
+/// No-op on platforms without a scanner.
+pub fn scan_qr_code() {
+    #[cfg(target_os = "android")]
+    {
+        android::jni::start_qr_scan_android();
+    }
+}
+
 // ── Keyboard height ─────────────────────────────────────────────────────────
 
 use std::sync::atomic::AtomicU32;

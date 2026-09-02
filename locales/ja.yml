@@ -124,6 +124,8 @@ daemon.iroh_description: 接続チケットを公開し、別の Waku クライ�
 daemon.iroh_status_enabled: 有効
 daemon.iroh_status_disabled: 無効
 daemon.iroh_ticket: チケット
+daemon.show_qr: QRコードを表示
+daemon.hide_qr: QRコードを隠す
 daemon.iroh_ticket_unavailable: デーモンを再起動するとチケットが生成されます
 daemon.iroh_ticket_placeholder: リモートチケットを貼り付け
 daemon.iroh_connect_title: リモートデーモンに接続

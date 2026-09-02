@@ -653,6 +653,60 @@ impl Waku {
                 })
             });
 
+        // "生成二维码" — renders the ticket as a scannable QR panel below
+        // the row so the mobile app can scan it instead of paste.
+        let qr_shown = self.ticket_qr_image.is_some();
+        let qr_ticket = apply_remote_ticket.clone();
+        let qr_button = div()
+            .id("show-daemon-iroh-qr")
+            .tab_index(0)
+            .h(px(27.0))
+            .px(px(9.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .cursor_default()
+            .text_size(sp(12.5))
+            .text_color(theme.text_secondary)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(icon("icons/qr-code.svg", 11.0, theme.text_tertiary))
+            .child(if qr_shown {
+                tr!("daemon.hide_qr")
+            } else {
+                tr!("daemon.show_qr")
+            })
+            .on_click({
+                let qr_ticket = qr_ticket.clone();
+                cx.listener(move |this, _, _, cx| {
+                    if this.ticket_qr_image.is_some() {
+                        this.ticket_qr_image = None;
+                    } else {
+                        this.ticket_qr_image = ticket_qr_image(&qr_ticket);
+                    }
+                    cx.notify();
+                })
+            })
+            .on_key_down({
+                let qr_ticket = qr_ticket.clone();
+                cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if !event.keystroke.modifiers.modified()
+                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    {
+                        if this.ticket_qr_image.is_some() {
+                            this.ticket_qr_image = None;
+                        } else {
+                            this.ticket_qr_image = ticket_qr_image(&qr_ticket);
+                        }
+                        cx.notify();
+                        cx.stop_propagation();
+                    }
+                })
+            });
+
         let exposure_toggle = toggle_switch(
             "daemon-exposure-toggle",
             enabled,
@@ -1026,8 +1080,26 @@ impl Waku {
                                         .text_color(theme.text)
                                         .child(SharedString::from(apply_remote_ticket.clone())),
                                 )
-                                .child(copy_iroh_ticket_button),
+                                .child(copy_iroh_ticket_button)
+                                .child(qr_button),
                         )
+                        // Scannable QR of the ticket, shown on demand.
+                        .when_some(self.ticket_qr_image.clone(), |card, qr| {
+                            card.child(
+                                div()
+                                    .mt(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .py(px(8.0))
+                                    .child(
+                                        img(qr)
+                                            .w(px(180.0))
+                                            .h(px(180.0))
+                                            .flex_none(),
+                                    ),
+                            )
+                        })
                     }),
             )
             .child(
@@ -2953,10 +3025,36 @@ fn permission_status_row(
         .child(status)
 }
 
+/// Render a ticket string as a QR code PNG wrapped in a GPUI image. The
+/// `qrcode` crate draws the modules; we scale the image up so the modules
+/// stay crisp when the panel shows it at a fixed logical size.
+fn ticket_qr_image(ticket: &str) -> Option<std::sync::Arc<gpui::Image>> {
+    use qrcode::QrCode;
+
+    let code = QrCode::new(ticket.as_bytes()).ok()?;
+    let png = code
+        .render::<image::Luma<u8>>()
+        .min_dimensions(256, 256)
+        .quiet_zone(true)
+        .build();
+
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    png.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
+    Some(std::sync::Arc::new(gpui::Image::from_bytes(
+        gpui::ImageFormat::Png,
+        bytes.into_inner(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::abbreviate_home_path;
+    use super::{abbreviate_home_path, ticket_qr_image};
     use std::path::Path;
+
+    #[test]
+    fn ticket_qr_image_renders_a_png() {
+        assert!(ticket_qr_image("waku://test-ticket-abc123").is_some());
+    }
 
     #[test]
     fn provider_paths_abbreviate_only_the_home_prefix() {

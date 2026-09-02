@@ -292,6 +292,48 @@ public class GpuiActivity extends NativeActivity {
         return text == null ? "" : text.toString();
     }
 
+    /** Request code for the QR scanner activity result. */
+    private static final int REQ_QR_SCAN = 0x5152;
+
+    /**
+     * Launch a QR scanner. Tries a few well-known scanner Intents (Google
+     * ML Kit, ZXing) and falls back gracefully if none is installed. The
+     * scanned text is forwarded to native via nativeCommitText so it fills
+     * the ticket field.
+     */
+    public static void startQrScan() {
+        GpuiActivity activity = sInstance;
+        if (activity == null) {
+            return;
+        }
+        activity.runOnUiThread(() -> {
+            android.content.Intent intent = new android.content.Intent(
+                    "com.google.zxing.client.android.SCAN");
+            intent.putExtra("SCAN_MODE", "QR_CODE_MODE");
+            try {
+                activity.startActivityForResult(intent, REQ_QR_SCAN);
+            } catch (android.content.ActivityNotFoundException e) {
+                Log.w("GpuiActivity", "No QR scanner app installed");
+                // TODO: surface a "no scanner installed" hint in the UI.
+            }
+        });
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_QR_SCAN && resultCode == RESULT_OK && data != null) {
+            String scanned = data.getStringExtra("SCAN_RESULT");
+            if (scanned != null && !scanned.isEmpty()) {
+                try {
+                    nativeCommitText(scanned);
+                } catch (Throwable t) {
+                    Log.e("GpuiActivity", "nativeCommitText (scan) failed", t);
+                }
+            }
+        }
+    }
+
     /**
      * Called from Rust to focus the hidden IME target and (when
      * {@code showKeyboard}) pop the soft keyboard. Both run on the UI

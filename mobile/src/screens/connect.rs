@@ -202,6 +202,28 @@ pub fn render_connect_screen(
                                     }),
                                 )
                                 .child("清空"),
+                        )
+                        .child(
+                            div()
+                                .id("scan-ticket")
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .h(px(40.0))
+                                .px_4()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(0x2E3038))
+                                .text_sm()
+                                .text_color(rgb(theme.on_surface_variant))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                                        gpui_mobile::scan_qr_code();
+                                        cx.notify();
+                                    }),
+                                )
+                                .child("📷 扫码"),
                         ),
                 )
                 .child({

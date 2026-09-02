@@ -1061,6 +1061,9 @@ pub struct Waku {
     analytics: crate::analytics::Analytics,
     state: PersistedState,
     store: StateStore,
+    /// QR rendering of the daemon iroh ticket, generated on demand by the
+    /// "生成二维码" button in Settings. `None` hides the QR panel.
+    ticket_qr_image: Option<std::sync::Arc<gpui::Image>>,
     /// Cached before rendering so path labels can abbreviate the home prefix
     /// without consulting the environment or account database in a frame.
     home_directory: Option<PathBuf>,
@@ -2761,6 +2764,7 @@ impl Waku {
                 analytics,
                 state,
                 store,
+                ticket_qr_image: None,
                 home_directory,
                 composer,
                 user_input_answer,

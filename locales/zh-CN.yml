@@ -120,6 +120,8 @@ daemon.iroh_description: 发布连接票据，让另一台设备上的 Waku 客�
 daemon.iroh_status_enabled: 已启用
 daemon.iroh_status_disabled: 已禁用
 daemon.iroh_ticket: 票据
+daemon.show_qr: 生成二维码
+daemon.hide_qr: 隐藏二维码
 daemon.iroh_ticket_unavailable: 重启守护进程以生成票据
 daemon.iroh_ticket_placeholder: 粘贴远程票据
 daemon.iroh_connect_title: 连接到远程守护进程
