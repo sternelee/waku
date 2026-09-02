@@ -1250,19 +1250,20 @@ pub fn get_clipboard_text_android() -> String {
     result.unwrap_or_default()
 }
 
-/// Focus the activity's hidden IME EditText so the soft keyboard's
-/// commitText (paste, autocorrect) path is active. NativeActivity touches
-/// bypass Activity.dispatchTouchEvent, so this must be re-asserted from
-/// native on every touch.
-pub fn focus_ime_target() {
+/// Focus the activity's hidden IME EditText and (when `show_keyboard`)
+/// pop the soft keyboard anchored to it. Focusing and showing both happen
+/// on the UI thread inside the activity, so the IME binds the EditText's
+/// InputConnection before the keyboard appears — the NDK
+/// `show_soft_input` ran before focus landed and failed to pop.
+pub fn focus_ime_target(show_keyboard: bool) {
     let _ = with_env(|env| {
         match find_app_class(env, "dev.waku.mobile.GpuiActivity") {
             Ok(activity_class) => {
                 let result = env.call_static_method(
                     &activity_class,
                     jni::jni_str!("requestImeFocus"),
-                    jni::jni_sig!("()V"),
-                    &[],
+                    jni::jni_sig!("(Z)V"),
+                    &[jni::objects::JValue::Bool(show_keyboard)],
                 );
                 env.exception_clear();
                 if result.is_err() {
@@ -1279,18 +1280,9 @@ pub fn focus_ime_target() {
 }
 
 pub fn show_keyboard_android(_keyboard_type: crate::KeyboardType) {
-    if let Some(app) = android_app() {
-        log::info!("show_keyboard_android: using NDK show_soft_input");
-
-        // Focus the activity's hidden EditText so the IME's
-        // `onCreateInputConnection` path is active — that is what lets
-        // paste / autocorrect arrive as `commitText` instead of being lost.
-        focus_ime_target();
-
-        app.show_soft_input(false);
-    } else {
-        log::warn!("show_keyboard_android: no AndroidApp");
-    }
+    // Focus + show together on the UI thread so the IME binds the
+    // EditText's commitText path before the keyboard appears.
+    focus_ime_target(true);
 }
 
 /// Hide the software keyboard on Android.

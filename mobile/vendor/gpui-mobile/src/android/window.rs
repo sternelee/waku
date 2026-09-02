@@ -1500,11 +1500,6 @@ impl PlatformWindow for AndroidPlatformWindow {
                             logical_x,
                             logical_y
                         );
-                        // Keep the hidden IME EditText focused so paste
-                        // (commitText) reaches it. NativeActivity touches
-                        // bypass Activity.dispatchTouchEvent, so the focus
-                        // must be re-asserted from native.
-                        crate::android::jni::focus_ime_target();
                         // Cancel any active momentum fling — the user
                         // touched the screen, so inertia must stop.
                         // Also flush any pending coalesced scroll.

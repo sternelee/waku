@@ -293,10 +293,12 @@ public class GpuiActivity extends NativeActivity {
     }
 
     /**
-     * Called from Rust before showing the soft keyboard: focus the hidden
-     * IME target so the IME's commitText path is active.
+     * Called from Rust to focus the hidden IME target and (when
+     * {@code showKeyboard}) pop the soft keyboard. Both run on the UI
+     * thread after focus, so the IME binds the EditText — not the native
+     * surface — before the keyboard is shown.
      */
-    public static void requestImeFocus() {
+    public static void requestImeFocus(boolean showKeyboard) {
         GpuiActivity activity = sInstance;
         if (activity == null || activity.mImeTarget == null) {
             return;
@@ -304,19 +306,17 @@ public class GpuiActivity extends NativeActivity {
         // View/IME operations must run on the UI thread; this JNI entry is
         // called from the native thread (touch + keyboard), so hop over.
         activity.runOnUiThread(() -> {
-            boolean focused = activity.mImeTarget.requestFocus();
-            Log.i("GpuiActivity", "requestImeFocus: focused=" + focused
-                    + " hasFocus=" + activity.mImeTarget.hasFocus()
-                    + " curFocus=" + activity.getWindow().getCurrentFocus());
-            // Bind the IME to the EditText explicitly, not to the native
-            // surface's (empty) InputConnection. restartInput forces the
-            // IME to (re)bind the EditText's onCreateInputConnection, and
-            // showSoftInput anchors the IME session to it.
+            activity.mImeTarget.requestFocus();
             android.view.inputmethod.InputMethodManager imm =
                     (android.view.inputmethod.InputMethodManager)
                             activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
-            if (imm != null) {
-                imm.restartInput(activity.mImeTarget);
+            if (imm == null) {
+                return;
+            }
+            // Rebind the IME to the EditText's InputConnection, then (only
+            // when the field was tapped) show the keyboard anchored to it.
+            imm.restartInput(activity.mImeTarget);
+            if (showKeyboard) {
                 imm.showSoftInput(activity.mImeTarget, 0);
             }
         });
