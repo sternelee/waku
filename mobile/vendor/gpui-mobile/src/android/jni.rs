@@ -1210,6 +1210,34 @@ pub fn set_system_chrome(style: &crate::SystemChromeStyle) {
 /// The NDK function handles the UI-thread dispatch internally.
 ///
 /// Text input arrives via `KeyEvent`s through `process_input_events()`.
+/// Focus the activity's hidden IME EditText so the soft keyboard's
+/// commitText (paste, autocorrect) path is active. NativeActivity touches
+/// bypass Activity.dispatchTouchEvent, so this must be re-asserted from
+/// native on every touch.
+pub fn focus_ime_target() {
+    let _ = with_env(|env| {
+        match find_app_class(env, "dev.waku.mobile.GpuiActivity") {
+            Ok(activity_class) => {
+                let result = env.call_static_method(
+                    &activity_class,
+                    jni::jni_str!("requestImeFocus"),
+                    jni::jni_sig!("()V"),
+                    &[],
+                );
+                env.exception_clear();
+                if result.is_err() {
+                    log::warn!("focus_ime_target: requestImeFocus failed: {result:?}");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                log::warn!("focus_ime_target: find_app_class failed: {error}");
+                Err(error)
+            }
+        }
+    });
+}
+
 pub fn show_keyboard_android(_keyboard_type: crate::KeyboardType) {
     if let Some(app) = android_app() {
         log::info!("show_keyboard_android: using NDK show_soft_input");
@@ -1217,20 +1245,11 @@ pub fn show_keyboard_android(_keyboard_type: crate::KeyboardType) {
         // Focus the activity's hidden EditText so the IME's
         // `onCreateInputConnection` path is active — that is what lets
         // paste / autocorrect arrive as `commitText` instead of being lost.
-        let _ = with_env(|env| {
-            if let Ok(activity_class) = find_app_class(env, "dev.waku.mobile.GpuiActivity") {
-                let _ = env.call_static_method(
-                    &activity_class,
-                    jni::jni_str!("requestImeFocus"),
-                    jni::jni_sig!("()V"),
-                    &[],
-                );
-                env.exception_clear();
-            }
-            Ok(())
-        });
+        focus_ime_target();
 
         app.show_soft_input(false);
+    } else {
+        log::warn!("show_keyboard_android: no AndroidApp");
     }
 }
 

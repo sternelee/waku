@@ -1493,6 +1493,18 @@ impl PlatformWindow for AndroidPlatformWindow {
                 match touch.action {
                     // ── ACTION_DOWN ──────────────────────────────────────
                     0 => {
+                        log::info!(
+                            "AndroidWindow touch DOWN at physical ({}, {}) → logical ({:.1}, {:.1})",
+                            touch.x,
+                            touch.y,
+                            logical_x,
+                            logical_y
+                        );
+                        // Keep the hidden IME EditText focused so paste
+                        // (commitText) reaches it. NativeActivity touches
+                        // bypass Activity.dispatchTouchEvent, so the focus
+                        // must be re-asserted from native.
+                        crate::android::jni::focus_ime_target();
                         // Cancel any active momentum fling — the user
                         // touched the screen, so inertia must stop.
                         // Also flush any pending coalesced scroll.
@@ -1598,6 +1610,12 @@ impl PlatformWindow for AndroidPlatformWindow {
 
                     // ── ACTION_UP / ACTION_CANCEL ────────────────────────
                     1 | 3 => {
+                        log::info!(
+                            "AndroidWindow touch UP at physical ({}, {}) state={:?}",
+                            touch.x,
+                            touch.y,
+                            ts
+                        );
                         let position = gpui::point(gpui::px(logical_x), gpui::px(logical_y));
 
                         match *ts {

@@ -52,7 +52,7 @@ pub fn dispatch_field_input(this: &mut WakuMobile, text: &str) {
 pub fn render_connect_screen(
     this: &mut WakuMobile,
     cx: &mut gpui::Context<WakuMobile>,
-) -> impl IntoElement {
+) -> gpui::AnyElement {
     let theme = this.theme();
     let connecting = this.phase == ConnectionPhase::Connecting;
     let connected = this.phase == ConnectionPhase::Connected;
@@ -70,13 +70,13 @@ pub fn render_connect_screen(
     let disabled = connecting || connected || ticket.trim().is_empty();
 
     div()
-        .id("connect-scroll")
+        .id("connect-root")
         .flex()
         .flex_col()
         .flex_1()
-        .overflow_y_scroll()
         .child(
             div()
+                .id("connect-content")
                 .flex()
                 .flex_col()
                 .px_6()
@@ -101,7 +101,7 @@ pub fn render_connect_screen(
                 .child(
                     div()
                         .id("ticket-field")
-                        .min_h(px(104.0))
+                        .h(px(104.0))
                         .w_full()
                         .p_3()
                         .rounded_lg()
@@ -112,20 +112,12 @@ pub fn render_connect_screen(
                         .text_color(rgb(theme.on_surface))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                            cx.listener(|this, event: &MouseDownEvent, _window, cx| {
                                 this.active_field = FieldTarget::Ticket;
                                 show_keyboard_with_type(KeyboardType::Default);
                                 cx.notify();
                             }),
                         )
-                        .on_mouse_down_out(cx.listener(
-                            |this, _event: &MouseDownEvent, _window, cx| {
-                                if this.active_field == FieldTarget::Ticket {
-                                    hide_keyboard();
-                                    cx.notify();
-                                }
-                            },
-                        ))
                         .child(if ticket.is_empty() {
                             div()
                                 .text_color(rgb(0x6B7280))
@@ -186,6 +178,7 @@ pub fn render_connect_screen(
                     None
                 }),
         )
+        .into_any_element()
 }
 
 fn truncate_ticket(ticket: &str) -> String {

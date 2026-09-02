@@ -11,6 +11,7 @@ import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
@@ -153,6 +154,19 @@ public class GpuiActivity extends NativeActivity {
      * and let the system handle them instead.
      */
     @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        // Re-assert IME focus on every touch: NativeActivity's native
+        // surface grabs window focus, which would otherwise detach the
+        // hidden EditText from the IME and drop commitText (paste).
+        if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+            if (mImeTarget != null && !mImeTarget.hasFocus()) {
+                mImeTarget.requestFocus();
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
         switch (keyCode) {
@@ -232,10 +246,26 @@ public class GpuiActivity extends NativeActivity {
      * IME target so the IME's `onCreateInputConnection` / commitText path
      * is active.
      */
+    /**
+     * Called from Rust before showing the soft keyboard: focus the hidden
+     * IME target so the IME's commitText path is active.
+     */
     public static void requestImeFocus() {
         GpuiActivity activity = sInstance;
         if (activity != null && activity.mImeTarget != null) {
-            activity.mImeTarget.requestFocus();
+            boolean focused = activity.mImeTarget.requestFocus();
+            Log.i("GpuiActivity", "requestImeFocus: focused=" + focused
+                    + " hasFocus=" + activity.mImeTarget.hasFocus()
+                    + " curFocus=" + activity.getWindow().getCurrentFocus());
+            // Bind the IME to the EditText explicitly, not to the native
+            // surface's (empty) InputConnection.
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager)
+                            activity.getSystemService(android.content.Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(activity.mImeTarget, 0);
+                Log.i("GpuiActivity", "requestImeFocus: showSoftInput(EditText) called");
+            }
         }
     }
 
