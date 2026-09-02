@@ -11,10 +11,13 @@ use crate::state::{ConnectionPhase, WakuMobile};
 use crate::screens::{primary_button, ACCENT};
 
 /// The field the global IME callback currently targets.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldTarget {
     Ticket,
     Composer,
+    /// No field is focused — used to dismiss the keyboard when tapping
+    /// outside any text field.
+    None,
 }
 
 /// Feed IME text into the focused field's buffer. Called from `render` via
@@ -46,6 +49,8 @@ pub fn dispatch_field_input(this: &mut WakuMobile, text: &str) {
                 }
             }
         }
+        // No focused field — drop the text (keyboard should be hidden).
+        FieldTarget::None => {}
     }
 }
 
@@ -116,6 +121,17 @@ pub fn render_connect_screen(
                                 this.active_field = FieldTarget::Ticket;
                                 show_keyboard_with_type(KeyboardType::Default);
                                 cx.notify();
+                            }),
+                        )
+                        // Tapping outside the field dismisses the keyboard
+                        // so it doesn't cover the connect button below.
+                        .on_mouse_down_out(
+                            cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                                if this.active_field != FieldTarget::None {
+                                    this.active_field = FieldTarget::None;
+                                    hide_keyboard();
+                                    cx.notify();
+                                }
                             }),
                         )
                         .child(if ticket.is_empty() {
