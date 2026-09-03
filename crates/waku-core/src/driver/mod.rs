@@ -207,9 +207,19 @@ pub struct SessionOptions {
 
 pub(crate) fn start_local(
     provider: ProviderKind,
-    options: DriverStartOptions,
+    mut options: DriverStartOptions,
     events: DriverEventSender,
 ) -> anyhow::Result<DriverHandle> {
+    // A remote client that knows the session only as a project checkout may
+    // send an empty cwd (e.g. `SessionWorkspace::Local` has no path of its
+    // own). Spawning with `current_dir("")` fails with ENOENT and surfaces as
+    // a confusing "failed to start <provider>" — fall back to the daemon
+    // user's home directory instead.
+    if options.cwd.as_os_str().is_empty() {
+        options.cwd = dirs::home_dir()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    }
     let inner: Arc<dyn DriverControl> = match provider {
         ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
         ProviderKind::Pi => Arc::new(pi::PiDriver::start(pi::PiFlavor::Pi, options, events)?),

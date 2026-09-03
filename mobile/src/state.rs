@@ -143,6 +143,11 @@ pub struct WakuMobile {
     supervisor: Option<DaemonSupervisor>,
     pub client: Option<DaemonClient>,
     pub sessions: Vec<AgentSession>,
+    /// Full catalog snapshot — projects and the daemon's default working
+    /// directory are needed to resolve a session's cwd when starting a
+    /// runtime (`SessionWorkspace::Local` carries no path of its own, and an
+    /// empty cwd makes the daemon-side spawn fail with ENOENT).
+    pub catalog: Option<remote::Catalog>,
     pub loading_catalog: bool,
 
     pub chat: Option<ChatSession>,
@@ -171,6 +176,7 @@ impl WakuMobile {
             supervisor: None,
             client: None,
             sessions: Vec::new(),
+            catalog: None,
             loading_catalog: false,
             chat: None,
             chat_loading: false,
@@ -225,6 +231,10 @@ impl WakuMobile {
                         }
                     }
                     Err(error) => {
+                        // Log the full chain — the UI shows a short message,
+                        // but the iroh root cause (relay, direct, timeout)
+                        // only shows in the detailed error.
+                        log::error!("remote connect failed: {:#}", error);
                         this.error = Some(error.to_string());
                     }
                 }
@@ -241,6 +251,7 @@ impl WakuMobile {
         }
         self.supervisor = None;
         self.sessions.clear();
+        self.catalog = None;
         self.phase = ConnectionPhase::Disconnected;
         self.daemon_label = None;
         self.saved_ticket = None;
@@ -263,7 +274,8 @@ impl WakuMobile {
                 this.loading_catalog = false;
                 match result {
                     Ok(catalog) => {
-                        this.sessions = catalog.sessions;
+                        this.sessions = catalog.sessions.clone();
+                        this.catalog = Some(catalog);
                     }
                     Err(error) => {
                         this.error = Some(error);
@@ -285,15 +297,20 @@ impl WakuMobile {
         self.chat = None;
         self.navigate_to(Screen::Chat);
         cx.notify();
+        let catalog = self.catalog.clone().unwrap_or(remote::Catalog {
+            sessions: Vec::new(),
+            projects: Vec::new(),
+            // Empty fallback cwd: the daemon-side `start_local` guard
+            // substitutes the daemon user's home directory.
+            default_cwd: std::path::PathBuf::new(),
+        });
         let task = cx.background_executor().spawn(async move {
             remote::hydrate(&client, session_id).map_err(|error| error.to_string()).and_then(
                 |session| {
                     // A session whose runtime cannot come up still opens
                     // read-only; the reason surfaces as a hint in the chat.
-                    match remote::ensure_runtime(&client, &session) {
-                        Ok(runtime) => Ok((session, Some(runtime))),
-                        Err(_) => Ok((session, None)),
-                    }
+                    let runtime = remote::ensure_runtime(&client, &session, &catalog).ok();
+                    Ok((session, runtime))
                 },
             )
         });
@@ -394,6 +411,11 @@ impl WakuMobile {
 
         let session_id = chat.session.id;
         let attached = chat.runtime_id;
+        let catalog = self.catalog.clone().unwrap_or(remote::Catalog {
+            sessions: Vec::new(),
+            projects: Vec::new(),
+            default_cwd: std::path::PathBuf::new(),
+        });
         let task = cx.background_executor().spawn(async move {
             match attached {
                 Some(runtime_id) => Ok((runtime_id, None)),
@@ -402,9 +424,9 @@ impl WakuMobile {
                     // stored session options. Re-hydrating first keeps the
                     // Start options (model, cursor, workspace) fresh.
                     let hydrated = remote::hydrate(&client, session_id)
-                        .map_err(|error| error.to_string())?;
-                    let runtime = remote::ensure_runtime(&client, &hydrated)
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| format!("{error:#}"))?;
+                    let runtime = remote::ensure_runtime(&client, &hydrated, &catalog)
+                        .map_err(|error| format!("{error:#}"))?;
                     Ok((runtime.runtime_id, Some(runtime.supports_steer)))
                 }
             }
