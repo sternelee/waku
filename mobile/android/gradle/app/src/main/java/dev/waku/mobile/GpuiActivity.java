@@ -156,6 +156,32 @@ public class GpuiActivity extends NativeActivity {
         addContentView(mImeTarget, lp);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Fallback: deliver a held scan result on resume, whether the success
+        // listener ran (static) or the activity was rebuilt (SharedPreferences).
+        String scanned = sLastScanResult;
+        if (scanned == null) {
+            scanned = getSharedPreferences("waku_scan", MODE_PRIVATE)
+                    .getString("last_scan", null);
+        }
+        if (scanned != null) {
+            sLastScanResult = null;
+            getSharedPreferences("waku_scan", MODE_PRIVATE)
+                    .edit()
+                    .remove("last_scan")
+                    .apply();
+            if (!scanned.isEmpty()) {
+                try {
+                    nativeCommitText(scanned);
+                } catch (Throwable t) {
+                    Log.e("GpuiActivity", "nativeCommitText (resume) failed", t);
+                }
+            }
+        }
+    }
+
     /**
      * Check if the native library is fully initialized.
      * Returns false if the .so hasn't been loaded yet or if
@@ -292,14 +318,20 @@ public class GpuiActivity extends NativeActivity {
         return text == null ? "" : text.toString();
     }
 
-    /** Request code for the QR scanner activity result. */
+    /** Last scanned QR text, held across the scanner activity switch so the
+     *  result survives even if the success listener is dropped when the
+     *  scanner activity finishes. Polled from onResume as a fallback. */
+    private static volatile String sLastScanResult = null;
+
+    /** Request code for the ZXing scanner activity result. */
     private static final int REQ_QR_SCAN = 0x5152;
 
     /**
-     * Launch a QR scanner. Tries a few well-known scanner Intents (Google
-     * ML Kit, ZXing) and falls back gracefully if none is installed. The
-     * scanned text is forwarded to native via nativeCommitText so it fills
-     * the ticket field.
+     * Launch the ZXing QR scanner via IntentIntegrator's legacy
+     * startActivityForResult flow (NativeActivity supports onActivityResult,
+     * unlike registerForActivityResult). ZXing decodes dense, long-ticket QR
+     * codes (v12+) that ML Kit's code scanner misses. The scanned text is
+     * forwarded to native via nativeCommitText so it fills the ticket field.
      */
     public static void startQrScan() {
         GpuiActivity activity = sInstance;
@@ -307,30 +339,50 @@ public class GpuiActivity extends NativeActivity {
             return;
         }
         activity.runOnUiThread(() -> {
-            android.content.Intent intent = new android.content.Intent(
-                    "com.google.zxing.client.android.SCAN");
-            intent.putExtra("SCAN_MODE", "QR_CODE_MODE");
-            try {
-                activity.startActivityForResult(intent, REQ_QR_SCAN);
-            } catch (android.content.ActivityNotFoundException e) {
-                Log.w("GpuiActivity", "No QR scanner app installed");
-                // TODO: surface a "no scanner installed" hint in the UI.
-            }
+            com.google.zxing.integration.android.IntentIntegrator integrator =
+                    new com.google.zxing.integration.android.IntentIntegrator(activity);
+            integrator.setDesiredBarcodeFormats(
+                    com.google.zxing.integration.android.IntentIntegrator.QR_CODE);
+            integrator.setPrompt("对准桌面端的票据二维码");
+            integrator.setCameraId(0);
+            integrator.setBeepEnabled(true);
+            integrator.setBarcodeImageEnabled(false);
+            integrator.setOrientationLocked(true);
+            // Request code lets onActivityResult route the result.
+            integrator.initiateScan();
         });
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_QR_SCAN && resultCode == RESULT_OK && data != null) {
-            String scanned = data.getStringExtra("SCAN_RESULT");
-            if (scanned != null && !scanned.isEmpty()) {
-                try {
-                    nativeCommitText(scanned);
-                } catch (Throwable t) {
-                    Log.e("GpuiActivity", "nativeCommitText (scan) failed", t);
-                }
+        com.google.zxing.integration.android.IntentResult result =
+                com.google.zxing.integration.android.IntentIntegrator
+                        .parseActivityResult(requestCode, resultCode, data);
+        String scanned = null;
+        if (result != null) {
+            scanned = result.getContents();
+        }
+        // Fallback: read the SCAN_RESULT extra directly — some integrator /
+        // device combinations return an IntentResult with null contents even
+        // though the scan payload is present on the intent.
+        if ((scanned == null || scanned.isEmpty()) && data != null) {
+            scanned = data.getStringExtra("SCAN_RESULT");
+        }
+        if (scanned != null && !scanned.isEmpty()) {
+            sLastScanResult = scanned;
+            getSharedPreferences("waku_scan", MODE_PRIVATE)
+                    .edit()
+                    .putString("last_scan", scanned)
+                    .apply();
+            try {
+                nativeCommitText(scanned);
+            } catch (Throwable t) {
+                Log.e("GpuiActivity", "nativeCommitText (scan) failed", t);
             }
+            return;
+        }
+        if (result == null) {
+            super.onActivityResult(requestCode, resultCode, data);
         }
     }
 

@@ -111,4 +111,8 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     // AndroidX Media for MediaSessionCompat (used by GpuiMediaSession for system controls)
     implementation("androidx.media:media:1.7.1")
+    // ZXing Android Embedded for QR scanning — its decoder handles dense,
+    // long-ticket QR codes (v12+) that ML Kit's code scanner misses. Uses the
+    // legacy startActivityForResult flow which NativeActivity supports.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

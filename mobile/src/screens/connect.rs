@@ -218,7 +218,12 @@ pub fn render_connect_screen(
                                 .text_color(rgb(theme.on_surface_variant))
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                                        // Scanned text is delivered through the
+                                        // IME text path, which fills the
+                                        // active field — aim it at the ticket.
+                                        this.active_field = FieldTarget::Ticket;
+                                        this.error = None;
                                         gpui_mobile::scan_qr_code();
                                         cx.notify();
                                     }),

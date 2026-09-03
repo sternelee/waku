@@ -665,12 +665,28 @@ impl WakuMobile {
     /// top of `render` so text typed since the last frame lands before paint.
     /// Enter in the composer submits the prompt.
     pub fn drain_input(&mut self, cx: &mut Context<Self>) {
-        let texts: Vec<String> =
+        let mut texts: Vec<String> =
             PENDING_IME.with(|buffer| std::mem::take(&mut *buffer.borrow_mut()));
+        // Also drain text committed from the Android UI thread (IME paste,
+        // QR scan) — it can't use the thread-local callback.
+        texts.extend(gpui_mobile::drain_committed_text());
         if texts.is_empty() {
             return;
         }
         for text in texts {
+            // A long single commit on the Connect screen is a QR scan result
+            // (or a paste) — the whole ticket arrives at once. Fill the
+            // ticket field directly instead of relying on active_field, which
+            // the scanner's activity switch may have reset.
+            if self.screen == crate::screens::Screen::Connect && text.len() > 10 {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    self.ticket_input = trimmed.to_owned();
+                    self.active_field = crate::screens::connect::FieldTarget::Ticket;
+                    self.error = None;
+                    continue;
+                }
+            }
             crate::screens::connect::dispatch_field_input(self, &text);
         }
         // A trailing newline from IME "go" submits instead of leaving a

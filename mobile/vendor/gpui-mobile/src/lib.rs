@@ -158,6 +158,29 @@ thread_local! {
     static TEXT_INPUT_CALLBACK: RefCell<Option<TextInputCallbackFn>> = RefCell::new(None);
 }
 
+/// Cross-thread buffer for text committed from the UI thread (IME paste,
+/// QR scan result). `TEXT_INPUT_CALLBACK` is thread-local to the native
+/// main thread, so a commit arriving on the Android UI thread would be
+/// dropped; this global buffer is drained by the app on the render thread.
+static COMMITTED_TEXT: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Store committed text from any thread (IME paste / QR scan on the UI
+/// thread). Returns the drained buffer with [`drain_committed_text`].
+pub fn store_committed_text(text: &str) {
+    if let Ok(mut buffer) = COMMITTED_TEXT.lock() {
+        buffer.push(text.to_owned());
+    }
+    TEXT_INPUT_DIRTY.store(true, Ordering::Release);
+}
+
+/// Take all committed text buffered via [`store_committed_text`].
+pub fn drain_committed_text() -> Vec<String> {
+    COMMITTED_TEXT
+        .lock()
+        .map(|mut buffer| std::mem::take(&mut *buffer))
+        .unwrap_or_default()
+}
+
 /// Register a callback that receives text from the software keyboard.
 ///
 /// Only one callback can be active at a time. Call with `None` to clear it.

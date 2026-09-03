@@ -1094,8 +1094,8 @@ impl Waku {
                                     .py(px(8.0))
                                     .child(
                                         img(qr)
-                                            .w(px(180.0))
-                                            .h(px(180.0))
+                                            .w(px(340.0))
+                                            .h(px(340.0))
                                             .flex_none(),
                                     ),
                             )
@@ -3032,9 +3032,11 @@ fn ticket_qr_image(ticket: &str) -> Option<std::sync::Arc<gpui::Image>> {
     use qrcode::QrCode;
 
     let code = QrCode::new(ticket.as_bytes()).ok()?;
+    // Long tickets (hundreds of chars) produce dense QR codes; render at a
+    // higher resolution so each module stays scannable when displayed.
     let png = code
         .render::<image::Luma<u8>>()
-        .min_dimensions(256, 256)
+        .min_dimensions(512, 512)
         .quiet_zone(true)
         .build();
 

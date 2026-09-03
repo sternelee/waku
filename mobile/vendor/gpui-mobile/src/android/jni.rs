@@ -1399,8 +1399,10 @@ pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeCommitText(
         if text_string.is_empty() {
             return Ok(());
         }
-        // Deliver through the same global callback the key-event path uses.
-        crate::dispatch_text_input(&text_string);
+        // Store in the cross-thread buffer — this JNI runs on the Android UI
+        // thread, but TEXT_INPUT_CALLBACK is thread-local to the native main
+        // thread, so dispatch_text_input would drop it here.
+        crate::store_committed_text(&text_string);
         Ok(())
     });
 }
