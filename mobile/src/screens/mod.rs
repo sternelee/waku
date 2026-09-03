@@ -132,6 +132,7 @@ impl WakuMobile {
             bar = bar.leading_icon(
                 "←",
                 cx.listener(|this, _event, _window, cx| {
+                    log::info!("nav back tapped, screen={:?}", this.screen);
                     this.go_back();
                     cx.notify();
                 }),
@@ -247,7 +248,14 @@ impl gpui::Render for WakuMobile {
             })
             .child(nav_bar)
             .when_some(banner, |d, banner| d.child(banner))
-            .child(screen_content)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(screen_content),
+            )
             .when(show_tab_bar, |d| d.child(tab_bar))
             .when(show_tab_bar && safe.bottom > 0.0, |d| {
                 d.child(div().w_full().h(px(safe.bottom)).bg(rgb(theme.surface)))

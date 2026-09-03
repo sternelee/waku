@@ -31,11 +31,13 @@ pub fn render_sessions_screen(
         .flex()
         .flex_col()
         .flex_1()
+        .min_h_0()
         .id("sessions-root")
         .child(
             div()
                 .id("sessions-scroll")
                 .flex_1()
+                .min_h_0()
                 .overflow_y_scroll()
                 .children(if !connected {
                     vec![empty_state("尚未连接", "前往「连接」页粘贴远程主机票据")]

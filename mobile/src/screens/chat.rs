@@ -65,12 +65,14 @@ pub fn render_chat_screen(
         .flex()
         .flex_col()
         .flex_1()
+        .min_h_0()
         .id("chat-root")
         // ── Transcript ──────────────────────────────────────────────────
         .child(
             div()
                 .id("chat-transcript")
                 .flex_1()
+                .min_h_0()
                 .overflow_y_scroll()
                 .track_scroll(&this.chat_scroll)
                 .on_mouse_down(
@@ -217,7 +219,10 @@ fn render_text(text: &str) -> impl IntoElement {
     if !rest.is_empty() {
         children.push(div().child(rest.to_owned()).into_any_element());
     }
-    div().flex().flex_wrap().children(children)
+    // A block container (not a flex row) so long unbroken runs — URLs,
+    // code, base64 — soft-wrap inside the bubble's max width instead of
+    // overflowing the screen edge. Each segment wraps on its own line box.
+    div().w_full().children(children)
 }
 
 fn render_caret() -> impl IntoElement {
