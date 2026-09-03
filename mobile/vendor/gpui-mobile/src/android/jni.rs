@@ -1407,6 +1407,18 @@ pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeCommitText(
     });
 }
 
+/// JNI bridge: receive the IME height (logical points) from the Java
+/// WindowInsets listener. NativeActivity's content_rect does not change when
+/// the IME opens (the window pans), so the Java side reports it explicitly.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_waku_mobile_GpuiActivity_nativeSetKeyboardHeight(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    height: jni::sys::jfloat,
+) {
+    crate::set_keyboard_height(height as f32);
+}
+
 /// JNI bridge: receive a media action from `GpuiMediaSession` system controls.
 ///
 /// Actions: "play", "pause", "stop", "next", "previous"

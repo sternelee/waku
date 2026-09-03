@@ -154,7 +154,36 @@ public class GpuiActivity extends NativeActivity {
         lp.leftMargin = -10;
         lp.topMargin = -10;
         addContentView(mImeTarget, lp);
+
+        // Report the IME height to native so the composer lifts clear of the
+        // software keyboard. NativeActivity's content_rect does NOT change on
+        // IME show (the window pans instead), so the IME inset must be read
+        // from WindowInsets here on the Java side.
+        android.view.View content = getWindow().getDecorView();
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(
+                content,
+                (v, insets) -> {
+                    int imeBottom = insets
+                            .getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
+                            .bottom;
+                    int navBottom = insets
+                            .getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
+                            .bottom;
+                    // Keyboard height = IME inset above the navigation bar, in
+                    // logical points (the native side divides by density).
+                    float density = getResources().getDisplayMetrics().density;
+                    float kbLogical = Math.max(0, imeBottom - navBottom) / density;
+                    try {
+                        nativeSetKeyboardHeight(kbLogical);
+                    } catch (Throwable t) {
+                        Log.e("GpuiActivity", "nativeSetKeyboardHeight failed", t);
+                    }
+                    return insets;
+                });
     }
+
+    /** Called from the WindowInsets listener with the IME height in logical points. */
+    private native void nativeSetKeyboardHeight(float height);
 
     @Override
     protected void onResume() {

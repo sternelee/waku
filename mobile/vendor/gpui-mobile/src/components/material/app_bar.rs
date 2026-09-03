@@ -230,39 +230,11 @@ impl TopAppBar {
 
     /// Build a small top app bar.
     fn build_small(self) -> AnyElement {
-        let t = &self.theme;
-        let bar_bg = if self.scrolled {
-            t.surface_container
-        } else {
-            t.surface
-        };
-
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .w_full()
-            .h(px(64.0))
-            .px_1()
-            .bg(rgb(bar_bg));
-
-        // Leading icon
-        row = row.child(self.build_leading_slot());
-
-        // Title (left-aligned, takes remaining space)
-        row = row.child(
-            div()
-                .flex_1()
-                .pl_2()
-                .line_height(px(24.0))
-                .text_color(rgb(t.on_surface))
-                .child(div().text_size(px(22.0)).child(self.title.clone())),
-        );
-
-        // Trailing icons
-        row = row.child(self.build_trailing_slot());
-
-        row.into_any_element()
+        // `build()` only borrows the icon handlers, so it cannot attach the
+        // leading click handler. The interactive small bar is produced by the
+        // consuming `into_element` path, which owns and attaches `on_click`.
+        // Delegate there so the back button is actually tappable.
+        self.into_element().into_any_element()
     }
 
     /// Build a medium top app bar (two rows).
