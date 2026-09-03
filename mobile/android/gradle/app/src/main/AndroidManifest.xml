@@ -19,7 +19,8 @@
     - The theme hides the title bar and status bar for a fullscreen
       immersive experience.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network / connectivity permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -147,6 +148,18 @@
             android:name="dev.waku.mobile.GpuiAuthActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        />
+
+        <!-- ZXing barcode scanner. The library locks its CaptureActivity to
+             sensorLandscape; portrait is a lot more natural for one-handed
+             ticket scanning, so override the orientation here. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:stateNotNeeded="true"
+            android:theme="@style/zxing_CaptureTheme"
+            tools:replace="android:screenOrientation"
         />
 
     </application>
