@@ -606,6 +606,13 @@ struct ClaudeStreamState {
     /// the command, so keep it here until the matching tool result arrives.
     tools: HashMap<String, (ActivityKind, String, String, Option<String>)>,
     background_task_kinds: HashMap<String, BackgroundWorkKind>,
+    /// Detached, non-ambient tasks the CLI will wake this session for when
+    /// they settle. Replaced wholesale by each `background_tasks_changed`
+    /// level signal and kept current by the task bookends between them.
+    live_tasks: HashSet<String>,
+    /// The prompted turn's reply ended while `live_tasks` was non-empty: the
+    /// turn is held open for the wake instead of being reported finished.
+    parked: bool,
     /// Task tool-use id → task id, so a subagent's own messages — they arrive
     /// on the main channel with `parent_tool_use_id` set — can be routed into
     /// that task's output pane instead of this session's transcript.
@@ -834,6 +841,14 @@ fn context_window_from_result(value: &Value, last_model: Option<&str>) -> Option
         .max()
 }
 
+/// Housekeeping the CLI runs for itself — `skip_transcript` tasks and the
+/// live-update watchers it arms on its own. The wire marks them `ambient`
+/// and asks hosts to keep them out of activity indicators; letting one into
+/// the registry would also park the session on work the user never started.
+fn claude_task_is_ambient(value: &Value) -> bool {
+    value.get("ambient").and_then(Value::as_bool) == Some(true)
+}
+
 fn claude_task_id(value: &Value) -> Option<&str> {
     value
         .get("task_id")
@@ -917,6 +932,9 @@ fn claude_task_item(
     state: &ClaudeStreamState,
 ) -> Option<BackgroundWorkItem> {
     let task_id = claude_task_id(value)?.to_owned();
+    if claude_task_is_ambient(value) {
+        return None;
+    }
     let kind = claude_task_kind(value, state);
     let wire_description = value
         .get("description")
@@ -1048,14 +1066,31 @@ fn handle_claude_system(
 ) {
     let subtype = value.get("subtype").and_then(Value::as_str);
     if subtype == Some("background_tasks_changed") {
-        let items = value
+        let tasks = value
             .get("background_tasks")
             .or_else(|| value.get("backgroundTasks"))
             .or_else(|| value.get("tasks"))
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+            .cloned()
+            .unwrap_or_default();
+        // The level signal is authoritative for what can still wake the
+        // session; ambient housekeeping never parks a turn.
+        state.live_tasks = tasks
+            .iter()
+            .filter(|entry| !claude_task_is_ambient(entry))
             .filter_map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| claude_task_id(entry).map(str::to_owned))
+            })
+            .collect();
+        let items = tasks
+            .iter()
+            .filter_map(|entry| {
+                if claude_task_is_ambient(entry) {
+                    return None;
+                }
                 let bare_id = entry.as_str();
                 let task_id = bare_id
                     .map(str::to_owned)
@@ -1104,6 +1139,18 @@ fn handle_claude_system(
             && let Some(tool_use_id) = item.origin_activity_id.clone()
         {
             state.subagent_tasks.insert(tool_use_id, task_id.clone());
+        }
+        // The bookends keep the wake set current between level signals: a
+        // detached start joins it, a settle leaves it, and a foreground task
+        // joins when its patch backgrounds it (Ctrl-B's wire equivalent).
+        let backgrounded_by_patch = value
+            .pointer("/patch/is_backgrounded")
+            .and_then(Value::as_bool)
+            == Some(true);
+        if !item.status.is_live() {
+            state.live_tasks.remove(&task_id);
+        } else if (subtype == "task_started" && item.background) || backgrounded_by_patch {
+            state.live_tasks.insert(task_id.clone());
         }
         let output_tail_item = (subtype == "task_started"
             && item.key.kind == BackgroundWorkKind::Process)
@@ -1209,6 +1256,33 @@ fn forward_subagent_transcript(
     ));
 }
 
+/// Claude Code wakes itself. When detached work — a backgrounded shell
+/// command, a subagent, a monitor — settles after the model's reply ended,
+/// the CLI folds its `<task-notification>` into a fresh model call without
+/// any prompt from the host. Verified against 2.1.258: after the settling
+/// `task_notification`, stdout carries a new `init`, the partial stream, the
+/// assistant message and a `result`, and no user message is echoed. Model
+/// output is the marker rather than `init`, so a resume handshake can never
+/// open an empty turn.
+///
+/// A parked turn (see the `result` branch) is continued by its wake: the
+/// host learns the model is running again through `TurnStarted`, on the turn
+/// it already holds open. A wake that finds no turn at all — the host settled
+/// the parked one itself — opens a fresh one the same way.
+fn begin_unprompted_turn(
+    turn_active: &Mutex<bool>,
+    state: &mut ClaudeStreamState,
+    events: &DriverEventSender,
+) {
+    let mut active = turn_active.lock();
+    if *active && !state.parked {
+        return;
+    }
+    *active = true;
+    state.parked = false;
+    let _ = events.send(DriverEvent::TurnStarted);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_message(
     value: &Value,
@@ -1242,6 +1316,7 @@ fn handle_message(
         }
         Some("control_request") => {
             if value.pointer("/request/subtype").and_then(Value::as_str) == Some("can_use_tool") {
+                begin_unprompted_turn(turn_active, state, events);
                 if !request_user_input(value, events, state) {
                     request_permission(value, events, commands, auto_approve);
                 }
@@ -1299,6 +1374,7 @@ fn handle_message(
             {
                 return;
             }
+            begin_unprompted_turn(turn_active, state, events);
             let event = value.get("event").unwrap_or(&Value::Null);
             // Each assistant message re-arms the delta fallback.
             if event.get("type").and_then(Value::as_str) == Some("message_start") {
@@ -1338,6 +1414,7 @@ fn handle_message(
                 forward_subagent_transcript(parent, value, events, state);
                 return;
             }
+            begin_unprompted_turn(turn_active, state, events);
             if let Some(usage) = value.pointer("/message/usage") {
                 if let Some(model) = value.pointer("/message/model").and_then(Value::as_str) {
                     state.last_assistant_model = Some(model.to_owned());
@@ -1496,7 +1573,7 @@ fn handle_message(
                     context_window: Some(window),
                 });
             }
-            if !std::mem::take(&mut *turn_active.lock()) {
+            if !*turn_active.lock() {
                 return;
             }
             // Claude writes its generated title and rewind checkpoint to the
@@ -1518,6 +1595,17 @@ fn handle_message(
                     });
                 }
             }
+            // "I'll report back when it finishes" is not the end of the turn:
+            // the CLI wakes the model itself once the detached work settles,
+            // so the turn is parked and its wake continues it. Only a reply
+            // with nothing left to wait for settles it.
+            if !failed && !state.live_tasks.is_empty() {
+                state.parked = true;
+                let _ = events.send(DriverEvent::TurnParked);
+                return;
+            }
+            state.parked = false;
+            *turn_active.lock() = false;
             let _ = events.send(DriverEvent::TurnFinished {
                 success: !failed,
                 summary: None,
@@ -2519,6 +2607,153 @@ mod tests {
             !std::iter::from_fn(|| event_rx.try_recv().ok())
                 .any(|event| matches!(event, DriverEvent::TurnFinished { .. })),
             "a second result must not settle an already-finished turn"
+        );
+    }
+
+    #[test]
+    fn a_reply_with_detached_work_parks_the_turn_and_the_wake_continues_it() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        // Shapes captured from a live 2.1.258 stream: the reply ends while a
+        // backgrounded command still runs, and its settle wakes the model
+        // without any prompt from the host.
+        let reply = [
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+                {"task_id":"bkbum265v","task_type":"local_bash","description":"Sleep then print"}
+            ]}),
+            json!({"type":"system","subtype":"task_started","task_id":"bkbum265v",
+                "tool_use_id":"toolu_1","description":"Sleep then print",
+                "is_backgrounded":true,"task_type":"local_bash"}),
+            json!({"type":"result","is_error":false,"stop_reason":"end_turn","num_turns":2}),
+        ];
+        for message in reply {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+        let seen: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, DriverEvent::TurnParked)),
+            "a reply with live detached work parks the turn"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, DriverEvent::TurnFinished { .. })),
+            "a parked turn is not finished"
+        );
+        assert!(*turn.lock(), "the turn stays open for the wake");
+
+        let prelude = [
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+            json!({"type":"system","subtype":"task_notification","task_id":"bkbum265v",
+                "tool_use_id":"toolu_1","status":"completed","output_file":"","summary":""}),
+            json!({"type":"system","subtype":"init","session_id":"s","tools":[]}),
+            json!({"type":"system","subtype":"status","status":"requesting"}),
+        ];
+        for message in prelude {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+        // `init` and `status` also open a resume handshake that never runs
+        // the model; only model output reports the wake.
+        assert!(
+            !std::iter::from_fn(|| event_rx.try_recv().ok())
+                .any(|event| matches!(event, DriverEvent::TurnStarted)),
+            "a wake must not be reported before the model produces output"
+        );
+
+        let wake = [
+            json!({"type":"stream_event","parent_tool_use_id":null,
+                "event":{"type":"message_start","message":{"role":"assistant"}}}),
+            json!({"type":"stream_event","parent_tool_use_id":null,
+                "event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"It finished."}}}),
+            json!({"type":"assistant","parent_tool_use_id":null,
+                "message":{"content":[{"type":"text","text":"It finished."}]}}),
+            json!({"type":"result","is_error":false,"stop_reason":"end_turn","num_turns":1}),
+        ];
+        for message in wake {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+        let seen: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert!(
+            matches!(seen.first(), Some(DriverEvent::TurnStarted)),
+            "the wake continues the held turn"
+        );
+        assert!(matches!(&seen[1], DriverEvent::TextDelta(text) if text == "It finished."));
+        assert!(matches!(
+            seen.last(),
+            Some(DriverEvent::TurnFinished { success: true, .. })
+        ));
+        assert_eq!(
+            seen.iter()
+                .filter(|event| matches!(event, DriverEvent::TurnStarted))
+                .count(),
+            1,
+            "one wake is reported once"
+        );
+        assert!(!*turn.lock());
+        assert!(!state.parked);
+    }
+
+    #[test]
+    fn subagent_output_between_turns_does_not_open_a_turn() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({"type":"result","is_error":false,"stop_reason":"end_turn"}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        while event_rx.try_recv().is_ok() {}
+
+        // A detached subagent keeps streaming after the main turn settled.
+        let wire = [
+            json!({"type":"stream_event","parent_tool_use_id":"toolu_agent",
+                "event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"still going"}}}),
+            json!({"type":"assistant","parent_tool_use_id":"toolu_agent",
+                "message":{"content":[{"type":"text","text":"still going"}]}}),
+        ];
+        for message in wire {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+        assert!(!*turn.lock());
+        assert!(
+            !std::iter::from_fn(|| event_rx.try_recv().ok())
+                .any(|event| matches!(event, DriverEvent::TurnStarted)),
+            "subagent output is not the main model waking"
+        );
+    }
+
+    #[test]
+    fn ambient_housekeeping_tasks_stay_out_of_the_registry() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let wire = [
+            json!({"type":"system","subtype":"task_started","task_id":"w-watch",
+                "task_type":"local_bash","description":"Artifact live updates",
+                "is_backgrounded":true,"ambient":true}),
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+                {"task_id":"w-watch","task_type":"local_bash","ambient":true},
+                {"task_id":"b1","task_type":"local_bash","description":"build"}
+            ]}),
+            json!({"type":"system","subtype":"task_notification","task_id":"w-watch",
+                "status":"completed","output_file":"","summary":"","ambient":true}),
+        ];
+        for message in wire {
+            handle_message(&message, "s", &events, &commands, &turn, true, &mut state);
+        }
+        let seen: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert_eq!(seen.len(), 1, "only the level signal carries user work");
+        let DriverEvent::BackgroundWork(BackgroundWorkEvent::ReconcileLive { items }) = &seen[0]
+        else {
+            panic!("the level signal should reconcile live work");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key.provider_id, "b1");
+        assert_eq!(
+            state.live_tasks,
+            HashSet::from(["b1".to_owned()]),
+            "only user work can park a turn"
         );
     }
 

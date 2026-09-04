@@ -65,7 +65,11 @@ fn timestamp(value: Option<&str>) -> u64 {
         .unwrap_or_default()
 }
 
-fn session_title(provider: ProviderKind, title: Option<&str>, session_id: &str) -> String {
+pub(crate) fn session_title(
+    provider: ProviderKind,
+    title: Option<&str>,
+    session_id: &str,
+) -> String {
     title
         .map(str::trim)
         .filter(|title| !title.is_empty())

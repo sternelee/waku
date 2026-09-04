@@ -226,6 +226,9 @@ const SIDEBAR_PROJECT_REVEAL_BATCH: usize = 30;
 /// or how long ago the agent last replied. A session that has never replied
 /// shows nothing.
 pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<String> {
+    if session.status == SessionStatus::Background {
+        return Some(tr!("sidebar.status_background"));
+    }
     if session.is_busy()
         && let Some(turn) = session
             .turns
@@ -1982,6 +1985,13 @@ impl Waku {
                             12.0,
                             status_color(&theme, session.status),
                         )))
+                    })
+                    .when(session.status == SessionStatus::Background, |element| {
+                        element.child(icon(
+                            "icons/hourglass.svg",
+                            12.0,
+                            status_color(&theme, session.status),
+                        ))
                     })
                     .when(session.status == SessionStatus::Waiting, |element| {
                         element.child(icon(

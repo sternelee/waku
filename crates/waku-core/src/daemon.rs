@@ -464,8 +464,11 @@ impl Backend for WakuBackend {
                     ProviderKind::Codex => {
                         crate::codex_session::list_provider_sessions(&binary, limit)?
                     }
-                    ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::OpenCode => {
+                    ProviderKind::Cursor | ProviderKind::Fx => {
                         crate::acp_session::list_provider_sessions(provider, &binary, &[], limit)?
+                    }
+                    ProviderKind::OpenCode => {
+                        crate::opencode_session::list_provider_sessions(&binary, limit)?
                     }
                     ProviderKind::DeepSeek => {
                         crate::deepseek_session::list_provider_sessions(&binary, limit)?
@@ -778,6 +781,25 @@ impl Backend for WakuBackend {
                     }
                     driver.clone()
                 };
+                if let Command::Prompt {
+                    prompt,
+                    turn_id,
+                    message_id,
+                } = &command
+                {
+                    // Publish the submission into the runtime's event stream
+                    // before the provider can start the turn. Every attached
+                    // client mirrors the user message and its turn from this
+                    // event, so the submitting client's own save is no longer
+                    // the only record of the prompt — a follower that only
+                    // knew the provider's `turnStarted` used to persist a
+                    // projection without it, erasing the message for everyone.
+                    events.send(event_to_wire(DriverEvent::PromptSubmitted {
+                        message: prompt.clone(),
+                        turn_id: turn_id.unwrap_or_else(Uuid::new_v4),
+                        message_id: message_id.unwrap_or_else(Uuid::new_v4),
+                    })?)?;
+                }
                 handle_driver_command(&driver, command)
             }
         }
@@ -1626,7 +1648,7 @@ fn handle_driver_command(
     command: Command,
 ) -> anyhow::Result<ResponsePayload> {
     match command {
-        Command::Prompt { prompt } => driver.prompt(prompt),
+        Command::Prompt { prompt, .. } => driver.prompt(prompt),
         Command::Steer { prompt } => driver.steer(prompt),
         Command::Cancel => driver.cancel(),
         Command::CancelComputerUse => driver.cancel_computer_use(),
@@ -1762,6 +1784,7 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
             ("availableCommands", serde_json::to_value(commands)?)
         }
         DriverEvent::TurnStarted => ("turnStarted", Value::Null),
+        DriverEvent::TurnParked => ("turnParked", Value::Null),
         DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
         DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
         DriverEvent::Activity {
@@ -1815,6 +1838,14 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
                 image_url: state.image_url,
             })?,
         ),
+        DriverEvent::PromptSubmitted {
+            message,
+            turn_id,
+            message_id,
+        } => (
+            "promptSubmitted",
+            json!({ "message": message, "turnId": turn_id, "messageId": message_id }),
+        ),
         DriverEvent::SteerAccepted { message } => ("steerAccepted", json!({ "message": message })),
         DriverEvent::SteerRejected { message, reason } => (
             "steerRejected",
@@ -1852,6 +1883,7 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
         "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
         "turnStarted" => DriverEvent::TurnStarted,
+        "turnParked" => DriverEvent::TurnParked,
         "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
         "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),
         "activity" => {
@@ -1891,6 +1923,14 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
                 image_url: state.image_url,
             })
         }
+        "promptSubmitted" => {
+            let submitted: SubmittedPromptWire = serde_json::from_value(payload)?;
+            DriverEvent::PromptSubmitted {
+                message: submitted.message,
+                turn_id: submitted.turn_id,
+                message_id: submitted.message_id,
+            }
+        }
         "steerAccepted" => {
             let steer: AcceptedSteerWire = serde_json::from_value(payload)?;
             DriverEvent::SteerAccepted {
@@ -1924,6 +1964,14 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "processExited" => DriverEvent::ProcessExited,
         kind => bail!("daemon sent an unsupported driver event {kind:?}"),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmittedPromptWire {
+    message: String,
+    turn_id: Uuid,
+    message_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -2099,6 +2147,27 @@ mod tests {
         assert!(matches!(
             event_from_wire(wire).unwrap(),
             DriverEvent::TextDelta(text) if text == "hello"
+        ));
+    }
+
+    #[test]
+    fn wire_event_round_trip_preserves_prompt_submission_identity() {
+        let turn_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let wire = event_to_wire(DriverEvent::PromptSubmitted {
+            message: "ship it".into(),
+            turn_id,
+            message_id,
+        })
+        .unwrap();
+        assert_eq!(wire.kind, "promptSubmitted");
+        assert_eq!(wire.payload["message"], "ship it");
+        assert_eq!(wire.payload["turnId"], turn_id.to_string());
+        assert_eq!(wire.payload["messageId"], message_id.to_string());
+        assert!(matches!(
+            event_from_wire(wire).unwrap(),
+            DriverEvent::PromptSubmitted { message, turn_id: decoded_turn, message_id: decoded_message }
+                if message == "ship it" && decoded_turn == turn_id && decoded_message == message_id
         ));
     }
 }

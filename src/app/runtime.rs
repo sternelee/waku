@@ -165,6 +165,20 @@ fn coalesce_task_state(
     latest
 }
 
+/// The running turn and the user message that opened it — the identity other
+/// clients adopt when the daemon publishes this submission to the runtime.
+pub(super) fn submitted_prompt_identity(session: &AgentSession) -> (Option<Uuid>, Option<Uuid>) {
+    let Some(turn_id) = session.active_turn_id() else {
+        return (None, None);
+    };
+    let message_id = session
+        .messages
+        .iter()
+        .find(|message| message.turn_id == Some(turn_id) && message.role == MessageRole::User)
+        .map(|message| message.id);
+    (Some(turn_id), message_id)
+}
+
 pub(super) fn session_has_active_provider_turn(session: &AgentSession) -> bool {
     session.is_busy()
         && session
@@ -3163,6 +3177,7 @@ impl Waku {
                 pending_events: VecDeque::new(),
                 pending_steers: VecDeque::new(),
                 stream_phase: None,
+                park_announced: false,
                 stream_remeasure_pending: false,
                 pending_permission: None,
                 pending_user_input: None,
@@ -3196,6 +3211,13 @@ impl Waku {
             return;
         };
         if self.response_fork_preparations.contains_key(&session.id) {
+            return;
+        }
+        if session.status == SessionStatus::Background {
+            // The turn is parked on detached work and the provider is idle,
+            // so the message goes straight in as a steer: queued, it would
+            // wait for a settle that only the message itself could hasten.
+            self.steer_composer_submission(submission, cx);
             return;
         }
         if session.is_busy() {
@@ -3805,9 +3827,19 @@ impl Waku {
         // Claude's commands pass through untouched; its CLI owns expansion.
         let prompt = submission.prompt;
         let driver_prompt = self.resolve_provider_submission(provider, &prompt);
+        // The turn and its user message landed at accept time. Their ids go
+        // with the prompt so every other client attached to the runtime
+        // mirrors the same rows instead of minting its own.
+        let (turn_id, message_id) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(submitted_prompt_identity)
+            .unwrap_or((None, None));
         let mut failed_to_start = false;
         match driver {
-            Ok(driver) => driver.prompt(driver_prompt),
+            Ok(driver) => driver.prompt(driver_prompt, turn_id, message_id),
             Err(error) => {
                 failed_to_start = true;
                 let message = tr!("errors.start_agent", error = error);
@@ -3954,6 +3986,7 @@ impl Waku {
                         | DriverEvent::AgentPresetSelected(_)
                         | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }
+                        | DriverEvent::PromptSubmitted { .. }
                         | DriverEvent::SteerAccepted { .. }
                         | DriverEvent::SteerRejected { .. }
                         | DriverEvent::TurnFinished { .. }

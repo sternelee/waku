@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use anyhow::{Context as _, anyhow, bail};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::model::ProviderResumeCursor;
+use crate::model::{ProviderKind, ProviderResumeCursor, ProviderSessionSummary};
 
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,6 +24,77 @@ const FORK_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// A startup probe caught there must give up quickly and retry — at the full
 /// `HTTP_TIMEOUT` one hung probe would eat the whole start budget.
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Lists OpenCode's root sessions across every project, newest first.
+///
+/// ACP `session/list` is project-scoped: OpenCode resolves the request `cwd`,
+/// or the process cwd without one, to a project and lists only that project's
+/// sessions, so a catalog launched from Waku's isolated temp directory saw
+/// nothing but the "global" project. The server's `/experimental/session`
+/// route is the one cross-project listing OpenCode exposes, and each entry
+/// carries the directory the session was started in.
+pub fn list_provider_sessions(
+    binary: &Path,
+    limit: usize,
+) -> anyhow::Result<Vec<ProviderSessionSummary>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let server = match crate::opencode_pool::any_live(binary) {
+        Some(server) => server,
+        None => crate::opencode_pool::acquire(
+            binary,
+            &crate::acp_session::catalog_working_directory()?,
+        )?,
+    };
+    let response = server.request(
+        "GET",
+        &format!("/experimental/session?roots=true&limit={limit}"),
+        None,
+    )?;
+    Ok(session_summaries(&response))
+}
+
+fn session_summaries(response: &Value) -> Vec<ProviderSessionSummary> {
+    response
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(session_summary)
+        .collect()
+}
+
+fn session_summary(session: &Value) -> Option<ProviderSessionSummary> {
+    let session_id = session.get("id")?.as_str()?.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    let cwd = PathBuf::from(session.get("directory")?.as_str()?);
+    if !cwd.is_absolute() {
+        return None;
+    }
+    let time = session.get("time");
+    let created_at = unix_seconds(time.and_then(|time| time.get("created")));
+    let updated_at = unix_seconds(time.and_then(|time| time.get("updated"))).max(created_at);
+    Some(ProviderSessionSummary {
+        cursor: ProviderResumeCursor::OpenCode {
+            session_id: session_id.to_owned(),
+        },
+        title: crate::acp_session::session_title(
+            ProviderKind::OpenCode,
+            session.get("title").and_then(Value::as_str),
+            session_id,
+        ),
+        cwd,
+        created_at,
+        updated_at,
+    })
+}
+
+/// OpenCode stamps sessions in Unix milliseconds; the catalog sorts in seconds.
+fn unix_seconds(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or_default() / 1000
+}
 
 pub fn fork_session_at_turn(
     binary: &Path,
@@ -571,6 +642,71 @@ mod tests {
             "a TERM-responsive child should not consume the shutdown budget"
         );
         assert!(!server.is_alive());
+    }
+
+    #[test]
+    fn global_session_list_maps_root_sessions_across_projects() {
+        let catalog_root = std::env::temp_dir().join("waku-opencode-session-catalog");
+        let waku_directory = catalog_root.join("dev").join("waku");
+        let response = json!([
+            {
+                "id": "ses_waku",
+                "title": "Review and merge Waku PR #113",
+                "directory": waku_directory,
+                "time": { "created": 1_787_000_000_123_u64, "updated": 1_787_000_100_999_u64 },
+                "project": { "id": "prj_waku", "worktree": waku_directory }
+            },
+            {
+                "id": " ses_untitled ",
+                "directory": catalog_root,
+                "time": { "created": 1_786_000_000_000_u64 },
+                "project": { "id": "global", "worktree": catalog_root }
+            },
+            { "id": "ses_relative", "title": "skipped", "directory": "relative/dir" },
+            { "title": "no id", "directory": catalog_root },
+            { "id": "", "directory": catalog_root }
+        ]);
+
+        let sessions = session_summaries(&response);
+
+        assert_eq!(sessions.len(), 2, "{sessions:#?}");
+        assert_eq!(
+            sessions[0].cursor,
+            ProviderResumeCursor::OpenCode {
+                session_id: "ses_waku".into()
+            }
+        );
+        assert_eq!(sessions[0].title, "Review and merge Waku PR #113");
+        assert_eq!(sessions[0].cwd, waku_directory);
+        assert_eq!(sessions[0].created_at, 1_787_000_000);
+        assert_eq!(sessions[0].updated_at, 1_787_000_100);
+        assert_eq!(sessions[1].title, "OpenCode session ses_unti");
+        assert_eq!(sessions[1].cwd, catalog_root);
+        assert_eq!(sessions[1].updated_at, sessions[1].created_at);
+    }
+
+    #[test]
+    fn global_session_list_tolerates_a_non_array_response() {
+        assert!(session_summaries(&Value::Null).is_empty());
+        assert!(session_summaries(&json!({ "error": "nope" })).is_empty());
+    }
+
+    /// The catalog must come from OpenCode's cross-project store, not the
+    /// project the server happens to run in: every entry keeps its own
+    /// directory, and nothing is a subagent child.
+    #[test]
+    #[ignore = "requires an installed opencode"]
+    fn lists_sessions_across_projects_on_a_real_server() {
+        let binary =
+            crate::command_env::find_executable("opencode").expect("opencode is not installed");
+        let sessions = list_provider_sessions(&binary, 50).expect("the catalog should load");
+        assert!(sessions.iter().all(|session| session.cwd.is_absolute()));
+        assert!(
+            sessions
+                .windows(2)
+                .all(|pair| pair[0].updated_at >= pair[1].updated_at),
+            "OpenCode lists newest first"
+        );
     }
 
     /// Exercises the same cold-session path used when an edited message is

@@ -209,7 +209,7 @@ export function WakuApp() {
     let cancelled = false
     const candidates = new Set(
       taskState.data.sessions
-        .filter((session) => ['connecting', 'working', 'waiting'].includes(session.status))
+        .filter((session) => ['connecting', 'working', 'waiting', 'background'].includes(session.status))
         .map((session) => session.id),
     )
     if (current?.id) candidates.add(current.id)
@@ -966,7 +966,7 @@ export function WakuApp() {
   const palette = (
     <CommandPalette
       actions={paletteActions}
-      canChooseModel={Boolean(activeSession && !['connecting', 'working', 'waiting'].includes(activeSession.status))}
+      canChooseModel={Boolean(activeSession && !['connecting', 'working', 'waiting', 'background'].includes(activeSession.status))}
       canToggleUsage={Boolean(activeSession)}
       currentProvider={activeSession?.provider ?? 'codex'}
       initialView={paletteInitialView}

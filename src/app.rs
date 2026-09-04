@@ -112,11 +112,10 @@ const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
 /// result wakes it, then uses this cadence while streamed chunks remain.
-/// 120 ms matches Zeron's `STREAM_COMMIT_MS`: chunks queue for a full
-/// interval and fold into one drain → one notify → one remeasure, so the
-/// per-commit parse/flatten/highlight work runs at ~8 Hz regardless of the
-/// provider's chunk rate, and the veil dissolve spans the gap so streamed
-/// text still reads as continuous.
+/// Chunks queue for a full interval and fold into one drain → one notify →
+/// one remeasure, so the per-commit parse/flatten/highlight work runs at ~8 Hz
+/// regardless of the provider's chunk rate, and the veil dissolve spans the
+/// gap so streamed text still reads as continuous.
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(120);
 /// How long a session may sit untouched before its provider process is released.
 /// Codex and Pi stay resident between turns, so without this an afternoon of
@@ -874,6 +873,9 @@ struct SessionRuntime {
     /// accepted/rejected acknowledgement, in transport order.
     pending_steers: VecDeque<ComposerSubmission>,
     stream_phase: Option<StreamPhase>,
+    /// The parked-turn notification has fired for the turn in flight, so a
+    /// wake that parks again does not repeat it. Cleared when the turn ends.
+    park_announced: bool,
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
     pending_user_input: Option<PendingUserInput>,

@@ -648,6 +648,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
       let session = beginTurn(currentSession, prompt, attachments)
       cacheSession(session)
+      // The ids ride along with the prompt so every other client attached to
+      // the runtime mirrors this turn and its user message under the same rows.
+      const submittedTurn = session.turns.at(-1)
+      const submittedMessage = session.messages.find(
+        (message) => message.turn_id === submittedTurn?.id && message.role === 'user',
+      )
 
       let project: Project
       let runtime = entries.current.get(currentSession.id)
@@ -754,7 +760,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           }))
         }
         await client.request(
-          { type: 'prompt', prompt: providerPrompt },
+          {
+            type: 'prompt',
+            prompt: providerPrompt,
+            turnId: submittedTurn?.id ?? null,
+            messageId: submittedMessage?.id ?? null,
+          },
           session.id,
           runtime.runtimeId,
         )
@@ -811,7 +822,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       // unwound pursuit.
       const activating = operation.kind === 'set' && operation.status === 'active'
       const objective = operation.kind === 'set' ? operation.objective : null
-      const idle = !['connecting', 'working', 'waiting'].includes(currentSession.status)
+      const idle = !['connecting', 'working', 'waiting', 'background'].includes(currentSession.status)
         && currentSession.turns.at(-1)?.status !== 'running'
       const now = Math.floor(Date.now() / 1_000)
       let restoreOnFailure: AgentSession | null = null

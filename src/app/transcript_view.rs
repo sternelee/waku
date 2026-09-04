@@ -1795,12 +1795,21 @@ impl Waku {
     /// produced a single chunk — and stays below whatever streams in until
     /// the turn settles into its "Worked for N" fold.
     fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {
-        let elapsed = self
-            .selected_session()
+        let session = self.selected_session();
+        let elapsed = session
             .and_then(|session| session.turns.last())
             .filter(|turn| turn.status == TurnStatus::Running)
             .map(|turn| unix_time().saturating_sub(turn.started_at))
             .unwrap_or(0);
+        // A parked turn is waiting on detached work, not working.
+        let label = if session.is_some_and(|session| session.status == SessionStatus::Background) {
+            tr!("transcript.waiting_background")
+        } else {
+            tr!(
+                "transcript.working_for",
+                duration = format_working_elapsed(elapsed)
+            )
+        };
         div()
             .h(px(22.0))
             .flex()
@@ -1813,10 +1822,7 @@ impl Waku {
                     .line_height(sp(18.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_tertiary)
-                    .child(SharedString::from(tr!(
-                        "transcript.working_for",
-                        duration = format_working_elapsed(elapsed)
-                    ))),
+                    .child(SharedString::from(label)),
             )
             .into_any_element()
     }

@@ -140,7 +140,15 @@ export function SendButton({
   );
 }
 
-export function MobileComposer({ session }: { session: AgentSession }) {
+export function MobileComposer({
+  session,
+  onSubmitted,
+}: {
+  session: AgentSession;
+  /** Fires as the submission begins — before the runtime round-trip — so the
+   * transcript can pin to the tail the moment the message lands. */
+  onSubmitted?: () => void;
+}) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const daemon = useDaemon();
@@ -204,6 +212,7 @@ export function MobileComposer({ session }: { session: AgentSession }) {
     if (!prompt || submitting) return;
     setSubmitting(true);
     setLocalError(null);
+    onSubmitted?.();
     try {
       if (canSteer) await runtime.steerPrompt(session, prompt);
       else await runtime.sendPrompt(session, prompt);

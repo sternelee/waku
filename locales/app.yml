@@ -564,6 +564,8 @@ sidebar.status_working:
   en: Working
 sidebar.status_waiting:
   en: Waiting
+sidebar.status_background:
+  en: Waiting for background tasks
 sidebar.status_failed:
   en: Failed
 
@@ -1274,6 +1276,10 @@ session.stopped:
   en: Stopped
 session.turn_completed:
   en: Turn completed
+session.turn_waiting_background:
+  en: Waiting for background tasks
+transcript.waiting_background:
+  en: Waiting for background tasks
 session.stopped_before_response:
   en: The agent stopped before returning a response
 session.codex_exited_before_response:

@@ -155,6 +155,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "git-commit-horizontal",
     "globe",
     "github",
+    "hourglass",
     "hexagon",
     "info",
     "laptop",

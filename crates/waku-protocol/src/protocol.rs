@@ -92,6 +92,14 @@ pub enum Command {
     },
     Prompt {
         prompt: String,
+        /// The ids the submitting client already gave this turn and its user
+        /// message. The daemon republishes them with the submission so every
+        /// other client attached to the runtime mirrors the same rows instead
+        /// of minting its own; older clients omit them and the daemon mints.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<Uuid>,
     },
     Steer {
         prompt: String,

@@ -288,6 +288,7 @@ sidebar.add_project: リモートプロジェクトを追加
 sidebar.resize: サイドバーの幅を変更
 sidebar.status_working: 作業中
 sidebar.status_waiting: 待機中
+sidebar.status_background: バックグラウンドタスク待ち
 sidebar.status_failed: 失敗
 
 project.new_project: 新規プロジェクト…
@@ -655,6 +656,8 @@ errors.remote_project_picker: デーモンホスト上のプロジェクトを�
 
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
+session.turn_waiting_background: バックグラウンドタスクを待っています
+transcript.waiting_background: バックグラウンドタスクを待っています
 session.stopped_before_response: エージェントは回答を返す前に停止しました
 session.codex_exited_before_response: Codex app-server は回答を返す前に終了しました
 session.steer_rejected: エージェントに追加の指示を送れませんでした（%{error}）。メッセージはフォローアップとしてキューに追加されました

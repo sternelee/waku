@@ -125,9 +125,26 @@ export function queueSubmission(
   };
 }
 
+/** The ids beginTurn gave the running turn and the user message that opened
+ * it. They are sent with the prompt so the daemon can publish the same
+ * identity to every other client attached to the runtime. */
+export function submittedTurnIdentity(
+  session: AgentSession,
+): { turnId: string | null; messageId: string | null } {
+  const turn = session.turns.at(-1);
+  if (!turn || turn.status !== 'running') return { turnId: null, messageId: null };
+  const message = session.messages.find(
+    (candidate) => candidate.turn_id === turn.id && candidate.role === 'user',
+  );
+  return { turnId: turn.id, messageId: message?.id ?? null };
+}
+
 export function sessionBusy(session: Pick<AgentSession, 'status'>): boolean {
   return (
-    session.status === 'connecting' || session.status === 'working' || session.status === 'waiting'
+    session.status === 'connecting'
+    || session.status === 'working'
+    || session.status === 'waiting'
+    || session.status === 'background'
   );
 }
 

@@ -3,6 +3,10 @@ use super::*;
 const MAX_BACKGROUND_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_SETTLED_BACKGROUND_ITEMS: usize = 24;
 const OUTPUT_CACHE_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+/// How long a parked session keeps waiting for its provider's wake after the
+/// last detached work settled. Claude re-enters the model a few seconds after
+/// the settle; a first token that slow is a wake in progress, not a no-show.
+const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(30);
 const BACKGROUND_SUMMARY_MENU_ID: &str = "background-work-summary";
 const OPEN_IN_MENU_ID: &str = "open-in-app";
 const TASK_ID_COPY_CONTROL_ID: &str = "background-summary-copy-task-id";
@@ -633,6 +637,46 @@ impl Waku {
             && selected.is_some_and(|session_id| self.session_has_live_background_work(session_id))
         {
             self.last_background_work_tick = Instant::now();
+            cx.notify();
+        }
+
+        // A parked turn waits for its provider to wake it, which Claude does
+        // within seconds of a settle. Past that grace with no detached work
+        // left there is nothing to wait for, so the held turn settles the way
+        // its result would have — through the ordinary finish path.
+        let unparked = self
+            .runtimes
+            .iter()
+            .filter(|(_, runtime)| runtime.last_active_at.elapsed() >= BACKGROUND_RESUME_GRACE)
+            .map(|(session_id, _)| *session_id)
+            .filter(|session_id| {
+                !self.session_has_live_detached_work(*session_id)
+                    && self
+                        .state
+                        .sessions
+                        .iter()
+                        .find(|session| session.id == *session_id)
+                        .is_some_and(|session| session.status == SessionStatus::Background)
+            })
+            .collect::<Vec<_>>();
+        for session_id in unparked {
+            let Some(mut runtime) = self.runtimes.remove(&session_id) else {
+                continue;
+            };
+            let keep_runtime = self.handle_driver_event(
+                session_id,
+                &mut runtime,
+                DriverEvent::TurnFinished {
+                    success: true,
+                    summary: None,
+                },
+                true,
+                cx,
+            );
+            if keep_runtime {
+                self.runtimes.insert(session_id, runtime);
+            }
+            self.state.mark_session_dirty(session_id);
             cx.notify();
         }
     }

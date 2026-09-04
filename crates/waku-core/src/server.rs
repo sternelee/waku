@@ -1219,7 +1219,7 @@ mod tests {
                 Command::GetSettings => Ok(ResponsePayload::Settings {
                     settings: DaemonSettings::default(),
                 }),
-                Command::Prompt { prompt } => {
+                Command::Prompt { prompt, .. } => {
                     events.send(WireDriverEvent::new("textDelta", json!(prompt)))?;
                     Ok(ResponsePayload::Ack)
                 }
@@ -1651,6 +1651,8 @@ mod tests {
                 runtime_id,
                 Command::Prompt {
                     prompt: "streamed from the first client".into(),
+                    turn_id: None,
+                    message_id: None,
                 },
             )
             .unwrap();
@@ -2180,6 +2182,8 @@ mod tests {
                 runtime_id: blocked_runtime_id,
                 command: Command::Prompt {
                     prompt: "after start".into(),
+                    turn_id: None,
+                    message_id: None,
                 },
             },
             second_client_outgoing,

@@ -1,6 +1,5 @@
 //! Shared pulse clock for the repeating loaders.
 //!
-//! Ported from Zeron's motion kit (<https://github.com/zeronsh/comet>, MIT).
 //! A repeating `with_animation` element requests a redraw every display frame
 //! for as long as it is mounted — one working row pinned the whole window at
 //! 120 Hz on a ProMotion panel. Loaders instead read their phase from one
@@ -198,8 +197,7 @@ impl RenderOnce for Pulse {
     }
 }
 
-/// How long a side panel takes to slide open or shut. Zeron's panel
-/// transition (`crates/ui/src/motion.rs` `RESIZE`) is 200ms — long enough to
+/// How long a side panel takes to slide open or shut. 200ms is long enough to
 /// read as travel rather than a jump cut, short enough that the layout is
 /// settled before the pointer arrives anywhere else.
 pub const PANEL_SLIDE: Duration = Duration::from_millis(200);

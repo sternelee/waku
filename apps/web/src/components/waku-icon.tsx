@@ -31,6 +31,7 @@ export const WAKU_ICONS = {
   gitCommitHorizontal: 'i-waku-git-commit-horizontal',
   globe: 'i-waku-globe',
   github: 'i-waku-github',
+  hourglass: 'i-waku-hourglass',
   info: 'i-waku-info',
   laptop: 'i-waku-laptop',
   list: 'i-waku-list',

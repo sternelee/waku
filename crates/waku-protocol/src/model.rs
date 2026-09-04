@@ -665,12 +665,22 @@ pub enum SessionStatus {
     Connecting,
     Working,
     Waiting,
+    /// The turn is parked: the provider's reply ended, but detached work it
+    /// will wake the session for is still running — Claude Code re-enters the
+    /// model with a task notification once a backgrounded command, subagent
+    /// or monitor settles. The turn stays open for that wake. Busy, but the
+    /// provider is idle, so a new message steers straight in rather than
+    /// waiting in the follow-up queue.
+    Background,
     Failed,
 }
 
 impl SessionStatus {
     pub fn is_busy(self) -> bool {
-        matches!(self, Self::Connecting | Self::Working | Self::Waiting)
+        matches!(
+            self,
+            Self::Connecting | Self::Working | Self::Waiting | Self::Background
+        )
     }
 }
 
@@ -1331,6 +1341,57 @@ impl AgentSession {
         id
     }
 
+    /// Mirror a prompt submitted to this session's runtime, possibly by
+    /// another client.
+    ///
+    /// The submitting client already holds the turn and its user message, so
+    /// a running turn that has a user message is left alone — that covers the
+    /// submitter's own echo and a client that hydrated after the submission
+    /// was saved. A running turn without one is a provider-started turn this
+    /// client was following; the submission becomes its prompt. With no
+    /// running turn the submission opens one here exactly as it did on the
+    /// submitting client, reusing that client's ids so the projections every
+    /// client saves agree on the rows. Returns whether the session changed.
+    pub fn adopt_submitted_prompt(
+        &mut self,
+        message: &str,
+        turn_id: Uuid,
+        message_id: Uuid,
+    ) -> bool {
+        let now = unix_time();
+        if let Some(active) = self.active_turn_id() {
+            let has_prompt = self.messages.iter().any(|candidate| {
+                candidate.turn_id == Some(active) && candidate.role == MessageRole::User
+            });
+            if has_prompt {
+                return false;
+            }
+            let mut prompt = Message::new_for_turn(MessageRole::User, message, active);
+            prompt.id = message_id;
+            self.messages.push(prompt);
+            self.updated_at = now;
+            return true;
+        }
+        self.set_title_from_prompt(message);
+        self.turns.push(AgentTurn {
+            id: turn_id,
+            turn_count: self.turns.len() + 1,
+            status: TurnStatus::Running,
+            provider_turn_started: false,
+            provider_resume_at: None,
+            started_at: now,
+            completed_at: None,
+            checkpoint: None,
+        });
+        let mut prompt = Message::new_for_turn(MessageRole::User, message, turn_id);
+        prompt.id = message_id;
+        self.messages.push(prompt);
+        self.status = SessionStatus::Connecting;
+        self.last_reply_at = Some(now);
+        self.updated_at = now;
+        true
+    }
+
     /// Whether the running turn is a provider-initiated one whose pursuit has
     /// not been confirmed — no user message belongs to it and the provider
     /// has not reported its start. These are the optimistic turns a `/goal`
@@ -1761,7 +1822,21 @@ pub enum DriverEvent {
     /// Authoritative over filesystem discovery, which cannot see plugin or
     /// dynamically registered commands.
     AvailableCommands(Vec<ReportedCommand>),
+    /// A client submitted a prompt to this runtime. The daemon publishes it
+    /// ahead of the provider's `TurnStarted` so every attached client — not
+    /// only the one that typed it — carries the user message and the turn it
+    /// opens. The projections those clients save then describe the same
+    /// transcript; see [`AgentSession::adopt_submitted_prompt`].
+    PromptSubmitted {
+        message: String,
+        turn_id: Uuid,
+        message_id: Uuid,
+    },
     TurnStarted,
+    /// The provider's turn ended while detached work it will wake the
+    /// session for is still running. The turn stays open — the wake's
+    /// `TurnStarted` continues it — and the session shows it is waiting.
+    TurnParked,
     TextDelta(String),
     ReasoningDelta(String),
     Activity {
@@ -4518,6 +4593,62 @@ mod tests {
         let checkpoint = session.turns[0].checkpoint.as_ref().unwrap();
         assert_eq!((checkpoint.additions, checkpoint.deletions), (10, 7));
         assert!(checkpoint.totals_are_current());
+    }
+
+    #[test]
+    fn a_follower_adopts_another_clients_submission_under_its_ids() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        session.begin_turn("first");
+        session.push_message(MessageRole::Assistant, "done");
+        session.finish_active_turn(TurnStatus::Completed);
+        session.status = SessionStatus::Idle;
+        let turn_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+
+        assert!(session.adopt_submitted_prompt("second", turn_id, message_id));
+
+        assert_eq!(session.status, SessionStatus::Connecting);
+        assert_eq!(session.active_turn_id(), Some(turn_id));
+        let turn = session.turns.last().unwrap();
+        assert_eq!(turn.turn_count, 2);
+        assert!(!turn.provider_turn_started);
+        let prompt = session.messages.last().unwrap();
+        assert_eq!(prompt.id, message_id);
+        assert_eq!(prompt.turn_id, Some(turn_id));
+        assert_eq!(prompt.role, MessageRole::User);
+        assert_eq!(prompt.content, "second");
+    }
+
+    #[test]
+    fn the_submitters_own_echo_changes_nothing() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let turn_id = session.begin_turn("first");
+        session.status = SessionStatus::Connecting;
+        let message_id = session.messages[0].id;
+
+        assert!(!session.adopt_submitted_prompt("first", turn_id, message_id));
+
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.status, SessionStatus::Connecting);
+    }
+
+    #[test]
+    fn a_provider_started_turn_takes_the_submitted_prompt_as_its_own() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        let provider_turn = session.begin_provider_turn();
+        session.mark_active_turn_provider_started();
+        session.status = SessionStatus::Working;
+        let message_id = Uuid::new_v4();
+
+        assert!(session.adopt_submitted_prompt("continue", Uuid::new_v4(), message_id));
+
+        assert_eq!(session.turns.len(), 1);
+        let prompt = session.messages.last().unwrap();
+        assert_eq!(prompt.id, message_id);
+        assert_eq!(prompt.turn_id, Some(provider_turn));
+        assert_eq!(prompt.role, MessageRole::User);
+        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import type { AgentSession } from '@waku/client';
 import * as Haptics from 'expo-haptics';
-import { router } from 'expo-router';
+import { router, Stack, type NativeStackNavigationOptions } from 'expo-router';
 import { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -24,6 +24,7 @@ import { GlassSurface } from '@/components/glass-surface';
 import { ProviderIcon, providerBrandColor } from '@/components/provider-icon';
 import { ConnectionStatus } from '@/components/connection-status';
 import { RenameDialog } from '@/components/rename-dialog';
+import { useScreenHeaderInset } from '@/components/screen-header';
 import { Sheet, SheetRow } from '@/components/sheet';
 import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useTaskState } from '@/hooks/use-daemon-data';
@@ -39,9 +40,24 @@ import {
   type SessionListItem,
 } from '@/lib/session-presentation';
 
-const DaemonPickerTop = 8;
 const DaemonPickerHeight = 38;
 const DaemonPickerGap = 12;
+const SearchDockGap = 14;
+
+/**
+ * The daemon switcher is the navigation bar's leading item. Keeping the task
+ * list's chrome in the bar, like every other screen, is what lets UIKit hold
+ * the bar still and crossfade its items during a swipe-back into this screen.
+ * The pill draws its own glass, so the system's shared item background is
+ * hidden rather than doubled. The element reads daemon state itself, which
+ * keeps these options one stable object.
+ */
+const TasksHeaderOptions: NativeStackNavigationOptions = {
+  headerLeft: () => <DaemonPill />,
+  unstable_headerLeftItems: () => [
+    { type: 'custom', element: <DaemonPill />, hidesSharedBackground: true },
+  ],
+};
 
 export default function TasksScreen() {
   const theme = useTheme();
@@ -50,8 +66,10 @@ export default function TasksScreen() {
   const runtime = useRuntime();
   const taskState = useTaskState();
   const [search, setSearch] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   const [actionTarget, setActionTarget] = useState<AgentSession | null>(null);
   const [renameTarget, setRenameTarget] = useState<AgentSession | null>(null);
+  const refreshOffset = useScreenHeaderInset();
   const visibleSessions = useMemo(() => {
     if (!taskState.data) return [];
     const query = search.trim().toLocaleLowerCase();
@@ -97,41 +115,19 @@ export default function TasksScreen() {
     );
   }
 
+  async function refreshTasks() {
+    setRefreshing(true);
+    try {
+      if (daemon.phase === 'connected') await taskState.refetch();
+      else await daemon.reconnect();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={[styles.screen, { backgroundColor: theme.background }]}>
-      <View
-        pointerEvents="box-none"
-        style={[styles.floatingActions, { top: insets.top + DaemonPickerTop }]}>
-        <GlassSurface interactive style={styles.daemonButton}>
-          <Pressable
-            accessibilityHint="Opens the daemon switcher"
-            accessibilityLabel={daemon.activeProfile
-              ? `Connected daemon: ${daemon.activeProfile.name}`
-              : 'Add a daemon'}
-            accessibilityRole="button"
-            hitSlop={8}
-            onPress={() => router.push('/daemons')}
-            style={({ pressed }) => [styles.daemonButtonInner, { opacity: pressed ? 0.62 : 1 }]}>
-            {daemon.activeProfile ? <ConnectionStatus compact phase={daemon.phase} /> : (
-              <AppSymbol
-                name={{ ios: 'plus', android: 'add', web: 'add' }}
-                size={14}
-                tintColor={theme.text}
-              />
-            )}
-            <Text numberOfLines={1} style={[styles.daemonButtonText, { color: theme.text }]}>
-              {daemon.activeProfile?.name ?? 'Add daemon'}
-            </Text>
-            <AppSymbol
-              name={{ ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }}
-              size={12}
-              tintColor={theme.textTertiary}
-            />
-          </Pressable>
-        </GlassSurface>
-      </View>
+    <View style={[styles.screen, { backgroundColor: theme.background }]}>
+      <Stack.Screen options={TasksHeaderOptions} />
 
       {!daemon.profiles.length && daemon.phase !== 'booting' ? (
         <Onboarding />
@@ -142,19 +138,17 @@ export default function TasksScreen() {
           contentContainerStyle={[
             styles.listContent,
             {
-              paddingTop:
-                insets.top + DaemonPickerTop + DaemonPickerHeight + DaemonPickerGap,
+              paddingTop: refreshOffset + DaemonPickerGap,
             },
             sections.length === 0 && styles.listContentEmpty,
           ]}
           refreshControl={(
             <RefreshControl
-              refreshing={taskState.isRefetching}
+              colors={[theme.textTertiary]}
+              progressViewOffset={refreshOffset}
+              refreshing={refreshing}
               tintColor={theme.textTertiary}
-              onRefresh={() => {
-                if (daemon.phase === 'connected') void taskState.refetch();
-                else void daemon.reconnect();
-              }}
+              onRefresh={() => void refreshTasks()}
             />
           )}
           renderSectionHeader={({ section }) => (
@@ -185,58 +179,64 @@ export default function TasksScreen() {
       )}
 
       {(daemon.profiles.length > 0 || daemon.phase === 'booting') && (
-        <View pointerEvents="box-none" style={[styles.searchDock, { bottom: insets.bottom + 14 }]}>
-          <GlassSurface interactive style={styles.searchCapsule}>
-            <View style={styles.searchCapsuleInner}>
-              <AppSymbol
-                name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
-                size={17}
-                tintColor={theme.textSecondary}
-              />
-              <TextInput
-                accessibilityLabel="Search tasks"
-                autoCapitalize="none"
-                autoCorrect={false}
-                placeholder="Search"
-                placeholderTextColor={theme.textTertiary}
-                selectionColor={NativeTint}
-                style={[styles.searchInput, { color: theme.text }]}
-                value={search}
-                onChangeText={setSearch}
-              />
-              {search.length > 0 && (
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'position' : undefined}
+          keyboardVerticalOffset={SearchDockGap}
+          pointerEvents="box-none"
+          style={[styles.searchDockAvoider, { bottom: insets.bottom + SearchDockGap }]}>
+          <View pointerEvents="box-none" style={styles.searchDock}>
+            <GlassSurface interactive style={styles.searchCapsule}>
+              <View style={styles.searchCapsuleInner}>
+                <AppSymbol
+                  name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
+                  size={17}
+                  tintColor={theme.textSecondary}
+                />
+                <TextInput
+                  accessibilityLabel="Search tasks"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  placeholder="Search"
+                  placeholderTextColor={theme.textTertiary}
+                  selectionColor={NativeTint}
+                  style={[styles.searchInput, { color: theme.text }]}
+                  value={search}
+                  onChangeText={setSearch}
+                />
+                {search.length > 0 && (
+                  <Pressable
+                    accessibilityLabel="Clear search"
+                    accessibilityRole="button"
+                    hitSlop={8}
+                    onPress={() => setSearch('')}
+                    style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}>
+                    <AppSymbol
+                      name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'cancel' }}
+                      size={16}
+                      tintColor={theme.textTertiary}
+                    />
+                  </Pressable>
+                )}
+              </View>
+            </GlassSurface>
+            {daemon.phase === 'connected' && (
+              <GlassSurface interactive style={styles.composeButton}>
                 <Pressable
-                  accessibilityLabel="Clear search"
+                  accessibilityLabel="New task"
                   accessibilityRole="button"
-                  hitSlop={8}
-                  onPress={() => setSearch('')}
-                  style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}>
+                  hitSlop={6}
+                  onPress={() => router.push('/new-task')}
+                  style={({ pressed }) => [styles.roundInner, { opacity: pressed ? 0.5 : 1 }]}>
                   <AppSymbol
-                    name={{ ios: 'xmark.circle.fill', android: 'cancel', web: 'cancel' }}
-                    size={16}
-                    tintColor={theme.textTertiary}
+                    name={{ ios: 'square.and.pencil', android: 'edit_square', web: 'edit' }}
+                    size={20}
+                    tintColor={theme.text}
                   />
                 </Pressable>
-              )}
-            </View>
-          </GlassSurface>
-          {daemon.phase === 'connected' && (
-            <GlassSurface interactive style={styles.composeButton}>
-              <Pressable
-                accessibilityLabel="New task"
-                accessibilityRole="button"
-                hitSlop={6}
-                onPress={() => router.push('/new-task')}
-                style={({ pressed }) => [styles.roundInner, { opacity: pressed ? 0.5 : 1 }]}>
-                <AppSymbol
-                  name={{ ios: 'square.and.pencil', android: 'edit_square', web: 'edit' }}
-                  size={20}
-                  tintColor={theme.text}
-                />
-              </Pressable>
-            </GlassSurface>
-          )}
-        </View>
+              </GlassSurface>
+            )}
+          </View>
+        </KeyboardAvoidingView>
       )}
 
       <Sheet onDismiss={() => setActionTarget(null)} visible={actionTarget !== null}>
@@ -275,7 +275,41 @@ export default function TasksScreen() {
           visible
         />
       )}
-    </KeyboardAvoidingView>
+    </View>
+  );
+}
+
+function DaemonPill() {
+  const theme = useTheme();
+  const daemon = useDaemon();
+  return (
+    <GlassSurface interactive style={styles.daemonButton}>
+      <Pressable
+        accessibilityHint="Opens the daemon switcher"
+        accessibilityLabel={daemon.activeProfile
+          ? `Connected daemon: ${daemon.activeProfile.name}`
+          : 'Add a daemon'}
+        accessibilityRole="button"
+        hitSlop={8}
+        onPress={() => router.push('/daemons')}
+        style={({ pressed }) => [styles.daemonButtonInner, { opacity: pressed ? 0.62 : 1 }]}>
+        {daemon.activeProfile ? <ConnectionStatus compact phase={daemon.phase} /> : (
+          <AppSymbol
+            name={{ ios: 'plus', android: 'add', web: 'add' }}
+            size={14}
+            tintColor={theme.text}
+          />
+        )}
+        <Text numberOfLines={1} style={[styles.daemonButtonText, { color: theme.text }]}>
+          {daemon.activeProfile?.name ?? 'Add daemon'}
+        </Text>
+        <AppSymbol
+          name={{ ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }}
+          size={12}
+          tintColor={theme.textTertiary}
+        />
+      </Pressable>
+    </GlassSurface>
   );
 }
 
@@ -451,6 +485,9 @@ function statusPresentation(
   if (session.status === 'waiting') {
     return { label: 'Needs input', color: theme.warning, spinner: false };
   }
+  if (session.status === 'background') {
+    return { label: 'Waiting for background tasks', color: theme.textSecondary, spinner: false };
+  }
   if (sessionBusy(session)) {
     return { label: 'Working', color: theme.success, spinner: true };
   }
@@ -462,24 +499,18 @@ function statusPresentation(
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  floatingActions: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 8,
-    left: Spacing.three,
+  roundInner: { alignItems: 'center', flex: 1, justifyContent: 'center' },
+  searchDockAvoider: {
+    left: 0,
     position: 'absolute',
+    right: 0,
     zIndex: 20,
   },
-  roundInner: { alignItems: 'center', flex: 1, justifyContent: 'center' },
   searchDock: {
     alignItems: 'center',
     flexDirection: 'row',
     gap: 10,
-    left: 0,
     paddingHorizontal: Spacing.three,
-    position: 'absolute',
-    right: 0,
-    zIndex: 20,
   },
   searchCapsule: { borderRadius: Radius.pill, flex: 1 },
   searchCapsuleInner: {

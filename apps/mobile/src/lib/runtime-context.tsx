@@ -4,6 +4,7 @@ import type {
   PendingPermission,
   PendingUserInput,
   ProviderKind,
+  SequencedEvent,
   UserInputAnswer,
 } from '@waku/client';
 import { reduceRuntimeEvent } from '@waku/client/event-reducer';
@@ -41,6 +42,7 @@ import {
   sessionBusy,
   sessionCwd,
   shouldApplyRuntimeEvent,
+  submittedTurnIdentity,
   type NewSessionOptions,
   type SessionOptionChanges,
 } from './mobile-runtime';
@@ -54,6 +56,20 @@ export interface MobileRuntime {
 interface RuntimeEntry extends MobileRuntime {
   lastDriverError: string | null;
   unsubscribe: () => void;
+  /** Buffered runtime events awaiting the next commit. */
+  pending: SequencedEvent[];
+  flushTimer: ReturnType<typeof setTimeout> | null;
+  lastFlushAt: number;
+}
+
+/** Stream deltas commit at ≤ ~8.3 Hz, the desktop stream pump's cadence: the
+ * transcript re-renders per commit, not per provider chunk. Interactive
+ * events (permissions, turn lifecycle) flush the buffer immediately. */
+const STREAM_COMMIT_MS = 120;
+
+function deferrableEvent(event: SequencedEvent): boolean {
+  const kind = event.event.kind;
+  return kind === 'textDelta' || kind === 'reasoningDelta' || kind === 'usageUpdated';
 }
 
 interface RuntimeContextValue {
@@ -103,13 +119,19 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const attachRequests = useRef(new Map<string, Promise<boolean>>());
   const persistTails = useRef(new Map<string, Promise<AgentSession>>());
   const persistTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  /** Advanced on every cache write of new local state, so a save reply that
+   * lands after newer runtime events cannot roll the cache back to the
+   * snapshot it saved. */
+  const cacheGenerations = useRef(new Map<string, number>());
   const pendingSteers = useRef(new Map<string, string[]>());
   const drainingQueues = useRef(new Set<string>());
   const sendPromptRef = useRef<
     ((session: AgentSession, prompt: string) => Promise<AgentSession>) | null
   >(null);
 
-  const cacheSession = useCallback((session: AgentSession) => {
+  /** Writes a session into the query cache without advancing its
+   * generation: the daemon's echo of a snapshot this client already holds. */
+  const writeSessionCache = useCallback((session: AgentSession) => {
     const profileId = daemon.activeProfile?.id;
     if (!profileId) return;
     queryClient.setQueryData(daemonKeys.session(profileId, session.id), session);
@@ -121,6 +143,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       return { ...current, sessions };
     });
   }, [daemon.activeProfile?.id, queryClient]);
+
+  /** Caches new local state — a submission, a runtime event, an edit. */
+  const cacheSession = useCallback((session: AgentSession) => {
+    cacheGenerations.current.set(
+      session.id,
+      (cacheGenerations.current.get(session.id) ?? 0) + 1,
+    );
+    writeSessionCache(session);
+  }, [writeSessionCache]);
 
   /** Full session from the query cache, hydrating from the daemon when only
    * the list skeleton is known. A skeleton must never be persisted back — it
@@ -141,13 +172,26 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const persistOrdered = useCallback((session: AgentSession): Promise<AgentSession> => {
     const client = daemon.client;
-    if (!client) return Promise.reject(new Error('Waku daemon is disconnected'));
+    const profileId = daemon.activeProfile?.id;
+    if (!client || !profileId) return Promise.reject(new Error('Waku daemon is disconnected'));
+    const generation = cacheGenerations.current.get(session.id);
     const previous = persistTails.current.get(session.id);
     const operation = (previous ?? Promise.resolve(session))
       .catch(() => session)
       .then(() => persistSession(client, session))
       .then((saved) => {
-        cacheSession(saved);
+        // The reply describes the snapshot that was saved. Runtime events
+        // committed while it was in flight are newer than that snapshot, so
+        // once the cache has moved on keep it and take only what the daemon
+        // owns — turn checkpoints — from the reply.
+        if (cacheGenerations.current.get(session.id) === generation) {
+          writeSessionCache(saved);
+        } else {
+          const latest = queryClient.getQueryData<AgentSession>(
+            daemonKeys.session(profileId, session.id),
+          );
+          if (latest) writeSessionCache(withDaemonCheckpoints(latest, saved));
+        }
         return saved;
       });
     persistTails.current.set(session.id, operation);
@@ -155,7 +199,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       if (persistTails.current.get(session.id) === operation) persistTails.current.delete(session.id);
     }).catch(() => {});
     return operation;
-  }, [cacheSession, daemon.client]);
+  }, [daemon.activeProfile?.id, daemon.client, queryClient, writeSessionCache]);
 
   const schedulePersist = useCallback((sessionId: string) => {
     const profileId = daemon.activeProfile?.id;
@@ -227,15 +271,23 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       starting,
       lastDriverError: null,
       unsubscribe: () => {},
+      pending: [],
+      flushTimer: null,
+      lastFlushAt: 0,
     };
     entries.current.set(session.id, entry);
     cacheSession(session);
     setRuntimes((current) => ({ ...current, [session.id]: publicRuntime(entry) }));
-    const unsubscribe = client.subscribe(session.id, runtimeId, (event) => {
-      if (entries.current.get(session.id) !== entry) return;
-      const key = daemonKeys.session(profileId, session.id);
-      let current = queryClient.getQueryData<AgentSession>(key) ?? session;
-      if (!shouldApplyRuntimeEvent(current, event)) return;
+
+    /** Apply one (possibly coalesced) event to `current` and collect its
+     * side effects; the caller commits once per flush. */
+    interface FlushState {
+      current: AgentSession;
+      mutated: boolean;
+      settled: boolean;
+      removeRuntime: boolean;
+    }
+    const reduceOne = (state: FlushState, event: SequencedEvent) => {
       if (event.event.kind === 'connected' || event.event.kind === 'turnStarted' || event.event.kind === 'turnFinished') {
         entry.lastDriverError = null;
       } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
@@ -243,17 +295,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       }
       if (event.event.kind === 'steerAccepted') {
         const payload = event.event.payload as { message?: string };
+        // The provider folded a steer into the live turn. Ours is pending
+        // here; another client's is not, and its message belongs in this
+        // transcript just the same — the desktop mirrors it too.
         const pending = pendingSteers.current.get(session.id)?.shift();
-        if (pending) {
-          current = {
-            ...current,
+        const content = payload.message ?? pending;
+        if (content) {
+          state.current = {
+            ...state.current,
             messages: [
-              ...current.messages,
+              ...state.current.messages,
               {
                 id: clock.randomUUID(),
-                turn_id: current.turns.at(-1)?.id ?? null,
+                turn_id: state.current.turns.at(-1)?.id ?? null,
                 role: 'user',
-                content: payload.message ?? pending,
+                content,
                 created_at: clock.nowSeconds(),
                 streaming: false,
               },
@@ -263,18 +319,17 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       } else if (event.event.kind === 'steerRejected') {
         const pending = pendingSteers.current.get(session.id)?.shift();
         if (pending) {
-          current = queueSubmission(current, pending, clock);
-          cacheSession(current);
-          void persistOrdered(current).catch(() => {});
+          state.current = queueSubmission(state.current, pending, clock);
+          void persistOrdered(state.current).catch(() => {});
           setErrors((values) => ({
             ...values,
             [session.id]: 'The agent couldn’t take that mid-turn, so it was queued for the next turn.',
           }));
         }
       }
-      const result = reduceRuntimeEvent(current, event, clock, entry.lastDriverError);
-      cacheSession(result.session);
-      schedulePersist(session.id);
+      const result = reduceRuntimeEvent(state.current, event, clock, entry.lastDriverError);
+      state.current = result.session;
+      state.mutated = true;
       if (result.permission !== undefined) {
         setPermissions((values) => ({ ...values, [session.id]: result.permission ?? undefined }));
       }
@@ -282,21 +337,95 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setUserInputs((values) => ({ ...values, [session.id]: result.userInput ?? undefined }));
       }
       if (result.error) setErrors((values) => ({ ...values, [session.id]: result.error }));
-      if (result.settled) {
+      if (result.settled) state.settled = true;
+      if (result.removeRuntime) state.removeRuntime = true;
+    };
+
+    /** Drain the buffer as one commit. Adjacent same-kind stream deltas
+     * coalesce into a single reduce (the desktop's `pop_stream_batch`), with
+     * per-event dedupe gates so a replay straddling the cursor stays exact. */
+    const flush = () => {
+      entry.flushTimer = null;
+      entry.lastFlushAt = Date.now();
+      if (entries.current.get(session.id) !== entry) {
+        entry.pending.length = 0;
+        return;
+      }
+      const batch = entry.pending.splice(0);
+      if (!batch.length) return;
+      const key = daemonKeys.session(profileId, session.id);
+      const state: FlushState = {
+        current: queryClient.getQueryData<AgentSession>(key) ?? session,
+        mutated: false,
+        settled: false,
+        removeRuntime: false,
+      };
+      let run: { kind: 'textDelta' | 'reasoningDelta'; text: string; envelope: SequencedEvent } | null = null;
+      const flushRun = () => {
+        if (!run) return;
+        reduceOne(state, { ...run.envelope, event: { kind: run.kind, payload: run.text } });
+        run = null;
+      };
+      for (const event of batch) {
+        if (!shouldApplyRuntimeEvent(state.current, event)) continue;
+        const kind = event.event.kind;
+        if ((kind === 'textDelta' || kind === 'reasoningDelta') && typeof event.event.payload === 'string') {
+          if (run && run.kind === kind) {
+            run.text += event.event.payload;
+            run.envelope = event;
+          } else {
+            flushRun();
+            run = { kind, text: event.event.payload, envelope: event };
+          }
+          continue;
+        }
+        flushRun();
+        reduceOne(state, event);
+      }
+      flushRun();
+      if (!state.mutated) return;
+      cacheSession(state.current);
+      if (state.settled) {
         const timer = persistTimers.current.get(session.id);
         if (timer) clearTimeout(timer);
         persistTimers.current.delete(session.id);
-        void persistOrdered(result.session)
+        void persistOrdered(state.current)
           .then(() => queryClient.invalidateQueries({ queryKey: daemonKeys.taskState(profileId) }))
           .then(() => drainQueue(session.id))
           .catch((cause) => {
             setErrors((values) => ({ ...values, [session.id]: errorMessage(cause) }));
           });
+      } else {
+        schedulePersist(session.id);
       }
-      if (result.removeRuntime) removeRuntime(session.id);
+      if (state.removeRuntime) removeRuntime(session.id);
+    };
+
+    const unsubscribe = client.subscribe(session.id, runtimeId, (event) => {
+      if (entries.current.get(session.id) !== entry) return;
+      entry.pending.push(event);
+      if (!deferrableEvent(event)) {
+        if (entry.flushTimer) {
+          clearTimeout(entry.flushTimer);
+          entry.flushTimer = null;
+        }
+        flush();
+        return;
+      }
+      if (entry.flushTimer) return;
+      const wait = Math.max(0, STREAM_COMMIT_MS - (Date.now() - entry.lastFlushAt));
+      entry.flushTimer = setTimeout(flush, wait);
     });
-    if (entries.current.get(session.id) === entry) entry.unsubscribe = unsubscribe;
-    else unsubscribe();
+    const teardown = () => {
+      if (entry.flushTimer) {
+        clearTimeout(entry.flushTimer);
+        entry.flushTimer = null;
+      }
+      entry.pending.length = 0;
+      unsubscribe();
+    };
+    if (entries.current.get(session.id) === entry) entry.unsubscribe = teardown;
+    else teardown();
     return entry;
   }, [cacheSession, daemon.activeProfile?.id, daemon.client, drainQueue, persistOrdered, queryClient, removeRuntime, schedulePersist]);
 
@@ -334,9 +463,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
     const prompt = rawPrompt.trim();
     if (!prompt) return inputSession;
-    let current = queryClient.getQueryData<AgentSession>(
-      daemonKeys.session(profileId, inputSession.id),
-    ) ?? inputSession;
+    // The screen can hand over a task-list skeleton while hydration is
+    // still in flight; building the turn on that would persist a transcript
+    // with only the new messages. Always start from the full session.
+    let current = await loadFullSession(inputSession.id);
     if (sessionBusy(current)) {
       const queued = queueSubmission(current, prompt, clock);
       cacheSession(queued);
@@ -373,6 +503,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
 
     current = beginTurn(current, prompt, clock);
+    // The ids beginTurn gave the turn and its user message ride along with
+    // the prompt, so every other client attached to the runtime mirrors the
+    // same rows instead of minting its own.
+    const submitted = submittedTurnIdentity(current);
     cacheSession(current);
     current = await persistOrdered(current);
     try {
@@ -402,7 +536,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         runtime.starting = false;
         setRuntimes((values) => ({ ...values, [current.id]: publicRuntime(runtime!) }));
       }
-      await client.request({ type: 'prompt', prompt }, current.id, runtime.runtimeId);
+      await client.request(
+        { type: 'prompt', prompt, turnId: submitted.turnId, messageId: submitted.messageId },
+        current.id,
+        runtime.runtimeId,
+      );
       setErrors((values) => removeKey(values, current.id));
       return current;
     } catch (cause) {
@@ -422,7 +560,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       await persistOrdered(failed).catch(() => failed);
       throw cause;
     }
-  }, [attachSession, cacheSession, daemon.activeProfile?.id, daemon.client, daemon.phase, persistOrdered, queryClient, removeRuntime, subscribe]);
+  }, [attachSession, cacheSession, daemon.activeProfile?.id, daemon.client, daemon.phase, loadFullSession, persistOrdered, queryClient, removeRuntime, subscribe]);
 
   useEffect(() => {
     sendPromptRef.current = sendPrompt;
@@ -699,4 +837,22 @@ function removeKey<T>(record: Record<string, T | undefined>, key: string): Recor
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error && cause.message.trim() ? cause.message : String(cause);
+}
+
+/** The daemon captures ending checkpoints itself, so a reply's checkpoint for
+ * a turn is the one part of it that can be newer than the local cache. */
+function withDaemonCheckpoints(latest: AgentSession, saved: AgentSession): AgentSession {
+  let changed = false;
+  const turns = latest.turns.map((turn) => {
+    const stored = saved.turns.find((candidate) => candidate.turn_count === turn.turn_count);
+    if (
+      !stored?.checkpoint
+      || JSON.stringify(stored.checkpoint) === JSON.stringify(turn.checkpoint)
+    ) {
+      return turn;
+    }
+    changed = true;
+    return { ...turn, checkpoint: stored.checkpoint };
+  });
+  return changed ? { ...latest, turns } : latest;
 }

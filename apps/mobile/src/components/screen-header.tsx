@@ -1,5 +1,6 @@
 import { BlurView } from "expo-blur";
-import { router } from "expo-router";
+import { router, type NativeStackHeaderItem } from "expo-router";
+import { useHeaderHeight } from "expo-router/build/react-navigation/elements";
 import type { ReactNode } from "react";
 import {
   Pressable,
@@ -7,8 +8,8 @@ import {
   Text,
   View,
   useColorScheme,
+  useWindowDimensions,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppSymbol } from "./app-symbol";
 import { GlassSurface } from "./glass-surface";
@@ -23,96 +24,107 @@ export function navigateBack() {
   else router.replace("/");
 }
 
-/** Content inset for screens whose scrolling content runs under the
- * floating glass header. */
+/**
+ * Bottom edge of the transparent native navigation bar, measured from the top
+ * of the screen. Content that runs under the bar insets by this. Rounded so
+ * the native height report, a fraction off the JS default, does not re-layout
+ * the transcript once it lands.
+ */
 export function useScreenHeaderInset() {
-  const insets = useSafeAreaInsets();
-  return insets.top + 62;
+  return Math.round(useHeaderHeight());
 }
 
 /**
- * Floating chrome header: a glass back button, a glass title capsule with an
- * optional "project · daemon" subtitle, and an optional trailing accessory
- * cluster. Positioned absolutely so content scrolls beneath the glass.
+ * Translucent chrome backdrop shown once content has scrolled under the
+ * navigation bar, like a native bar's scroll-edge treatment. It lives in the
+ * screen content, so it travels with the page during a swipe-back while the
+ * bar's buttons and title stay put in the native navigation bar above it.
  */
-export function ScreenHeader({
-  title,
-  subtitle,
-  right,
-  scrolled = false,
-}: {
-  title: string;
-  subtitle?: string | null;
-  right?: ReactNode;
-  /** Content has scrolled under the header: show the translucent chrome
-   * backdrop with its hairline bottom edge, like a native navigation bar. */
-  scrolled?: boolean;
-}) {
+export function ScreenHeaderBackdrop({ visible }: { visible: boolean }) {
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
   const colorScheme = useColorScheme();
+  const height = useScreenHeaderInset();
+  if (!visible) return null;
   return (
     <View
-      pointerEvents="box-none"
-      style={[styles.bar, { paddingTop: insets.top + 6 }]}
+      pointerEvents="none"
+      style={[
+        styles.backdrop,
+        {
+          height,
+          borderBottomColor: theme.borderStrong,
+          backgroundColor: colorScheme === "dark" ? "#333333e3" : "#ffffffd6",
+        },
+      ]}
     >
-      {scrolled && (
-        <View
-          pointerEvents="none"
-          style={[
-            StyleSheet.absoluteFill,
-            styles.backdrop,
-            {
-              borderBottomColor: theme.borderStrong,
-              backgroundColor:
-                colorScheme === "dark" ? "#333333e3" : "#ffffffd6",
-            },
-          ]}
-        >
-          <BlurView intensity={6} style={StyleSheet.absoluteFill} />
-        </View>
-      )}
-      <GlassSurface interactive style={styles.roundButton}>
-        <Pressable
-          accessibilityLabel="Back"
-          accessibilityRole="button"
-          hitSlop={6}
-          onPress={navigateBack}
-          style={({ pressed }) => [
-            styles.roundButtonInner,
-            { opacity: pressed ? 0.55 : 1 },
-          ]}
-        >
-          <AppSymbol
-            name={{
-              ios: "chevron.left",
-              android: "arrow_back",
-              web: "arrow_back",
-            }}
-            size={17}
-            tintColor={theme.text}
-          />
-        </Pressable>
-      </GlassSurface>
-      <View style={styles.titles}>
-        <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
-          {title}
-        </Text>
-        {subtitle ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.subtitle, { color: theme.textTertiary }]}
-          >
-            {subtitle}
-          </Text>
-        ) : null}
-      </View>
-      {right ?? <View style={styles.rightSpacer} />}
+      <BlurView intensity={6} style={StyleSheet.absoluteFill} />
     </View>
   );
 }
 
-/** Pill grouping trailing header actions, like the reference's [compose | …]. */
+/** Width kept clear on each side of the title for the bar's own items: the
+ * round back button on the left, a two-action glass capsule on the right.
+ * The title view is laid out by Yoga from its content, so it has to bound
+ * itself; UIKit only centers it. */
+const TitleSideReserve = 120;
+
+/**
+ * Navigation bar title with an optional "project · daemon" subtitle. Rendered
+ * as the bar's native title view, so UIKit owns it during transitions.
+ */
+export function HeaderTitle({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle?: string | null;
+}) {
+  const theme = useTheme();
+  const { width } = useWindowDimensions();
+  const maxWidth = Math.max(TitleSideReserve, width - TitleSideReserve * 2);
+  return (
+    <View style={[styles.titles, { maxWidth }]}>
+      <Text numberOfLines={1} style={[styles.title, { color: theme.text }]}>
+        {title}
+      </Text>
+      {subtitle ? (
+        <Text
+          numberOfLines={1}
+          style={[styles.subtitle, { color: theme.textTertiary }]}
+        >
+          {subtitle}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+export type HeaderActionSpec = {
+  icon: Parameters<typeof AppSymbol>[0]["name"];
+  label: string;
+  onPress: () => void;
+};
+
+/** Native bar button items for iOS: SF Symbol glyphs in the system's shared
+ * Liquid Glass capsule, grouped and transitioned by UIKit. */
+export function nativeHeaderButtons(
+  actions: HeaderActionSpec[],
+): NativeStackHeaderItem[] {
+  return actions.map((action) => {
+    const symbol =
+      typeof action.icon === "string" ? action.icon : action.icon.ios;
+    return {
+      type: "button",
+      label: action.label,
+      accessibilityLabel: action.label,
+      ...(symbol ? { icon: { type: "sfSymbol", name: symbol } } : {}),
+      onPress: action.onPress,
+    };
+  });
+}
+
+/** Pill grouping trailing header actions for platforms without native bar
+ * button items, like the reference's [compose | …]. */
 export function HeaderActionGroup({ children }: { children: ReactNode }) {
   return (
     <GlassSurface interactive style={styles.actionGroup}>
@@ -121,15 +133,7 @@ export function HeaderActionGroup({ children }: { children: ReactNode }) {
   );
 }
 
-export function HeaderAction({
-  icon,
-  label,
-  onPress,
-}: {
-  icon: Parameters<typeof AppSymbol>[0]["name"];
-  label: string;
-  onPress: () => void;
-}) {
+export function HeaderAction({ icon, label, onPress }: HeaderActionSpec) {
   const theme = useTheme();
   return (
     <Pressable
@@ -145,41 +149,27 @@ export function HeaderAction({
 }
 
 const styles = StyleSheet.create({
-  bar: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 10,
+  backdrop: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
     left: 0,
-    paddingBottom: 10,
-    paddingHorizontal: 12,
+    overflow: "hidden",
     position: "absolute",
     right: 0,
     top: 0,
     zIndex: 20,
   },
-  backdrop: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    overflow: "hidden",
-  },
-  roundButton: {
-    borderRadius: Radius.pill,
-    height: 44,
-    width: 44,
-  },
-  roundButtonInner: {
-    alignItems: "center",
-    flex: 1,
-    justifyContent: "center",
-  },
   titles: {
-    flex: 1,
+    alignItems: "center",
     justifyContent: "center",
     minWidth: 0,
-    paddingHorizontal: 2,
   },
-  title: { fontSize: 17, fontWeight: "700", letterSpacing: -0.3 },
-  subtitle: { fontSize: 12.5, marginTop: 1 },
-  rightSpacer: { width: 44 },
+  title: {
+    fontSize: 17,
+    fontWeight: "700",
+    letterSpacing: -0.3,
+    textAlign: "center",
+  },
+  subtitle: { fontSize: 12.5, marginTop: 1, textAlign: "center" },
   actionGroup: {
     alignItems: "center",
     borderRadius: Radius.pill,

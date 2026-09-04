@@ -90,19 +90,35 @@ export function reduceRuntimeEvent(
     case 'availableCommands':
       if (Array.isArray(payload)) session.available_commands = payload as ReportedCommand[]
       break
+    case 'promptSubmitted': {
+      // A prompt reached this runtime — from another client, or the echo of
+      // this one. Mirror the desktop's `adopt_submitted_prompt`, reusing the
+      // submitter's ids so every client's projection names the same rows.
+      const value = asRecord(payload)
+      if (!value || typeof value.message !== 'string') break
+      adoptSubmittedPrompt(
+        session,
+        value.message,
+        typeof value.turnId === 'string' ? value.turnId : clock.randomUUID(),
+        typeof value.messageId === 'string' ? value.messageId : clock.randomUUID(),
+        clock,
+      )
+      break
+    }
     case 'turnStarted': {
       const turn = activeTurn(session)
       if (turn) {
         turn.provider_turn_started = true
         session.status = 'working'
       } else if (
-        session.provider === 'codex'
-        && !['connecting', 'working', 'waiting'].includes(session.status)
+        (session.provider === 'codex' || session.provider === 'claude')
+        && !['connecting', 'working', 'waiting', 'background'].includes(session.status)
       ) {
-        // Codex starts turns on its own: goal continuation pursues an active
-        // goal whenever the thread is idle. Give the turn a transcript home —
-        // there is no user message for it — so its work streams in instead of
-        // being dropped.
+        // Some providers start turns on their own: Codex goal continuation
+        // pursues an active goal whenever the thread is idle, and Claude Code
+        // re-enters the model once a backgrounded command, subagent or monitor
+        // settles. Give the turn a transcript home — there is no user message
+        // for it — so its work streams in instead of being dropped.
         session.turns.push({
           id: clock.randomUUID(),
           turn_count: session.turns.length + 1,
@@ -115,6 +131,16 @@ export function reduceRuntimeEvent(
         })
         session.status = 'working'
       }
+      break
+    }
+    case 'turnParked': {
+      // The provider's reply ended while detached work it will wake the
+      // session for still runs. The turn stays open for that wake; only the
+      // streaming state settles.
+      if (!activeTurn(session)) break
+      finishStreamingMessages(session)
+      completeActivities(session)
+      session.status = 'background'
       break
     }
     case 'textDelta':
@@ -234,7 +260,7 @@ export function reduceRuntimeEvent(
         && !session.messages.some((message) => message.turn_id === pursuit.id)
       ) {
         session.turns.pop()
-        if (['connecting', 'working', 'waiting'].includes(session.status)) {
+        if (['connecting', 'working', 'waiting', 'background'].includes(session.status)) {
           session.status = 'idle'
         }
         break
@@ -300,6 +326,58 @@ function asUserInputQuestion(value: unknown): PendingUserInput['questions'][numb
       : [],
     multiSelect: question.multiSelect === true,
   }
+}
+
+/** A running turn that already has a user message is the submitter's own
+ * turn, or one hydrated after the submission was saved: leave it. A running
+ * turn without one is a provider-started turn this client was following, and
+ * the submission is its prompt. Otherwise open the turn here as the submitter
+ * did, under the submitter's ids. */
+function adoptSubmittedPrompt(
+  session: AgentSession,
+  message: string,
+  turnId: string,
+  messageId: string,
+  clock: ReducerClock,
+) {
+  const now = clock.nowSeconds()
+  const active = activeTurn(session)
+  if (active) {
+    const hasPrompt = session.messages.some(
+      (candidate) => candidate.turn_id === active.id && candidate.role === 'user',
+    )
+    if (hasPrompt) return
+    session.messages.push({
+      id: messageId,
+      turn_id: active.id,
+      role: 'user',
+      content: message,
+      created_at: now,
+      streaming: false,
+    })
+    return
+  }
+  setTitleFromPrompt(session, message)
+  session.turns.push({
+    id: turnId,
+    turn_count: session.turns.length + 1,
+    status: 'running',
+    provider_turn_started: false,
+    provider_resume_at: null,
+    started_at: now,
+    completed_at: null,
+    checkpoint: null,
+  })
+  session.messages.push({
+    id: messageId,
+    turn_id: turnId,
+    role: 'user',
+    content: message,
+    created_at: now,
+    streaming: false,
+  })
+  session.status = 'connecting'
+  session.last_reply_at = now
 }
 
 function appendText(session: AgentSession, delta: string, clock: ReducerClock) {
@@ -510,7 +588,7 @@ function activeTurn(session: AgentSession) {
 function acceptsTurnOutput(session: AgentSession) {
   return Boolean(
     activeTurn(session)
-      && ['connecting', 'working', 'waiting'].includes(session.status),
+      && ['connecting', 'working', 'waiting', 'background'].includes(session.status),
   )
 }
 

@@ -202,7 +202,7 @@ export function Composer({
   const mounted = useRef(true)
   const draftChange = useRef(onComposerDraftChange)
   draftChange.current = onComposerDraftChange
-  const busy = ['connecting', 'working', 'waiting'].includes(session.status)
+  const busy = ['connecting', 'working', 'waiting', 'background'].includes(session.status)
   const runningTurnId = [...session.turns].reverse().find((turn) => turn.status === 'running')?.id
   const escapeStopTarget = `${session.id}:${runningTurnId ?? ''}`
   const escapeStopArmed = busy && isEscapeStopArmed(escapeStopArm, escapeStopTarget, Date.now())

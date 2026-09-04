@@ -1,67 +1,64 @@
-import type { AgentSession, Checkpoint, Message } from '@waku/client';
-import {
-  formatMessageTime,
-  formatWorkingElapsed,
-} from '@waku/client/transcript-presentation';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
-import { router } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { router, Stack, type NativeStackNavigationOptions } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
-  FlatList,
   KeyboardAvoidingView,
   Platform,
-  Pressable,
-  RefreshControl,
   StyleSheet,
   Text,
   View,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
 } from 'react-native';
 
-import { ActivityGroup } from '@/components/activity-group';
+import { ActivitySheetHost } from '@/components/activity-sheet';
 import { AppSymbol } from '@/components/app-symbol';
-import { MarkdownMessage } from '@/components/markdown-message';
 import { MobileComposer } from '@/components/mobile-composer';
 import { RenameDialog } from '@/components/rename-dialog';
-import { GlassSurface } from '@/components/glass-surface';
-import { HeaderAction, HeaderActionGroup, navigateBack, ScreenHeader, useScreenHeaderInset } from '@/components/screen-header';
+import {
+  HeaderAction,
+  HeaderActionGroup,
+  HeaderTitle,
+  nativeHeaderButtons,
+  navigateBack,
+  ScreenHeaderBackdrop,
+  useScreenHeaderInset,
+  type HeaderActionSpec,
+} from '@/components/screen-header';
 import { Sheet, SheetRow } from '@/components/sheet';
-import { MonoFont, Radius, Spacing } from '@/constants/theme';
+import {
+  TranscriptList,
+  type TranscriptDevSample,
+  type TranscriptListHandle,
+} from '@/components/transcript-list';
+import { SessionEmpty } from '@/components/transcript-rows';
 import { useSession, useTaskState } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
 import { sessionBusy } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
-import {
-  buildTranscriptRows,
-  displaySessionTitle,
-  type TranscriptRow,
-} from '@/lib/session-presentation';
+import { displaySessionTitle } from '@/lib/session-presentation';
 
-export function SessionView({ sessionId }: { sessionId: string | undefined }) {
+export function SessionView({
+  sessionId,
+  devPrompt,
+}: {
+  sessionId: string | undefined;
+  /** Dev-only: auto-submit this prompt through the composer path once the
+   * session loads — lets headless rigs exercise the exact user flow. */
+  devPrompt?: string;
+}) {
   const theme = useTheme();
   const daemon = useDaemon();
   const runtime = useRuntime();
   const query = useSession(sessionId);
   const session = query.data;
-  const [expandedFolds, setExpandedFolds] = useState<ReadonlySet<string>>(new Set());
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
-  const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const [scrolledUnderHeader, setScrolledUnderHeader] = useState(false);
-  const transcriptRows = useMemo(
-    () => session ? buildTranscriptRows(session, expandedFolds) : [],
-    [expandedFolds, session],
-  );
+  const [underHeader, setUnderHeader] = useState(false);
   const running = Boolean(session && sessionBusy(session));
-  const listRef = useRef<FlatList<TranscriptRow>>(null);
-  const nearBottom = useRef(true);
-  const laidOut = useRef(false);
-  const viewportHeight = useRef(0);
+  const listRef = useRef<TranscriptListHandle>(null);
+  const headerInset = useScreenHeaderInset();
 
   useEffect(() => {
     if (!session || daemon.phase !== 'connected') return;
@@ -70,23 +67,35 @@ export function SessionView({ sessionId }: { sessionId: string | undefined }) {
     // started the runtime after this screen mounted).
   }, [daemon.phase, runtime.attachSession, session?.id, running]);
 
-  function trackScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const pinned = contentSize.height - layoutMeasurement.height - contentOffset.y < 120;
-    nearBottom.current = pinned;
-    setPinnedToBottom((current) => current === pinned ? current : pinned);
-    const under = contentOffset.y > 4;
-    setScrolledUnderHeader((current) => current === under ? current : under);
-  }
+  // The header backdrop resets with the session; the list reports the rest.
+  useEffect(() => setUnderHeader(false), [session?.id]);
 
-  function toggleFold(turnId: string) {
-    setExpandedFolds((current) => {
-      const next = new Set(current);
-      if (next.has(turnId)) next.delete(turnId);
-      else next.add(turnId);
-      return next;
-    });
-  }
+  const probe = useDevProbe(Boolean(devPrompt));
+
+  // Dev-only auto-submit: same path as the composer's send button.
+  const devPromptSent = useRef(false);
+  useEffect(() => {
+    if (!devPrompt || devPromptSent.current) return;
+    if (!session || query.isPlaceholderData) {
+      probe.setStatus('waiting for session');
+      return;
+    }
+    if (daemon.phase !== 'connected') {
+      probe.setStatus(`daemon ${daemon.phase}`);
+      return;
+    }
+    if (sessionBusy(session)) {
+      probe.setStatus('session busy');
+      return;
+    }
+    devPromptSent.current = true;
+    probe.setStatus('submitting');
+    listRef.current?.followNextGrowth();
+    runtime.sendPrompt(session, devPrompt)
+      .then(() => probe.setStatus('submitted'))
+      .catch((cause) => probe.setStatus(`failed ${String(cause).slice(0, 120)}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daemon.phase, devPrompt, query.isPlaceholderData, session]);
 
   async function copyLastResponse() {
     const lastAssistant = [...(session?.messages ?? [])]
@@ -122,91 +131,81 @@ export function SessionView({ sessionId }: { sessionId: string | undefined }) {
     );
   }
 
-  const headerInset = useScreenHeaderInset();
   const projectName = useTaskState().data?.projects
     .find((project) => project.id === session?.project_id)?.name;
   const subtitleParts = [projectName, daemon.activeProfile?.name].filter(Boolean);
+  const title = session ? displaySessionTitle(session) : 'Task';
+  const subtitle = subtitleParts.length ? subtitleParts.join(' · ') : null;
+  const hasSession = Boolean(session);
+
+  // The chrome lives in the native navigation bar, so it stays put while the
+  // page slides under a swipe-back. Keyed on the strings, not the session, so
+  // streaming updates never touch the bar.
+  const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
+    const actions: HeaderActionSpec[] = hasSession
+      ? [
+          {
+            icon: { ios: 'square.and.pencil', android: 'edit_square', web: 'edit' },
+            label: 'New task',
+            onPress: () => router.push('/new-task'),
+          },
+          {
+            icon: { ios: 'ellipsis', android: 'more_horiz', web: 'more_horiz' },
+            label: 'Task options',
+            onPress: () => setMenuOpen(true),
+          },
+        ]
+      : [];
+    return {
+      headerTitle: () => <HeaderTitle subtitle={subtitle} title={title} />,
+      headerRight: actions.length
+        ? () => (
+            <HeaderActionGroup>
+              {actions.map((action) => <HeaderAction key={action.label} {...action} />)}
+            </HeaderActionGroup>
+          )
+        : undefined,
+      unstable_headerRightItems: actions.length ? () => nativeHeaderButtons(actions) : undefined,
+    };
+  }, [hasSession, subtitle, title]);
 
   return (
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={[styles.screen, { backgroundColor: theme.background }]}>
-      <ScreenHeader
-        scrolled={scrolledUnderHeader}
-        right={session ? (
-          <HeaderActionGroup>
-            <HeaderAction
-              icon={{ ios: 'square.and.pencil', android: 'edit_square', web: 'edit' }}
-              label="New task"
-              onPress={() => router.push('/new-task')}
+      <Stack.Screen options={headerOptions} />
+      <View style={styles.body}>
+        {session ? (
+          <ActivitySheetHost key={session.id} session={session}>
+            <TranscriptList
+              headerInset={headerInset}
+              hydrated={!query.isPlaceholderData}
+              offline={daemon.phase === 'error'}
+              ref={listRef}
+              running={running}
+              session={session}
+              onDevSample={devPrompt ? probe.sample : undefined}
+              onUnderHeaderChange={setUnderHeader}
             />
-            <HeaderAction
-              icon={{ ios: 'ellipsis', android: 'more_horiz', web: 'more_horiz' }}
-              label="Task options"
-              onPress={() => setMenuOpen(true)}
-            />
-          </HeaderActionGroup>
-        ) : undefined}
-        subtitle={subtitleParts.length ? subtitleParts.join(' · ') : null}
-        title={session ? displaySessionTitle(session) : 'Task'}
-      />
-      <View style={styles.listFrame}>
-        <FlatList
-          ref={listRef}
-          data={transcriptRows}
-          keyExtractor={(item) => item.key}
-          contentContainerStyle={[
-            styles.content,
-            { paddingTop: headerInset + 2 },
-            !transcriptRows.length && styles.emptyContent,
-          ]}
-          refreshControl={(
-            <RefreshControl
-              refreshing={query.isRefetching}
-              tintColor={theme.textTertiary}
-              onRefresh={() => void query.refetch()}
-            />
-          )}
-          ListHeaderComponent={daemon.phase === 'error' ? <OfflineBanner /> : null}
-          ListEmptyComponent={(
-            <SessionEmpty loading={query.isPending} error={query.error} missing={query.data === null} />
-          )}
-          ListFooterComponent={running && session ? <WorkingFooter session={session} /> : null}
-          renderItem={({ item }) => <TranscriptRowView row={item} onToggleFold={toggleFold} />}
-          onContentSizeChange={(_, height) => {
-            if (!laidOut.current || nearBottom.current) {
-              listRef.current?.scrollToEnd({ animated: false });
-              laidOut.current = true;
-              // scrollToEnd fires no scroll event; content taller than the
-              // viewport means the top now sits under the header.
-              const under = height > viewportHeight.current + 8;
-              setScrolledUnderHeader((current) => current === under ? current : under);
-            }
-          }}
-          onLayout={(event) => {
-            viewportHeight.current = event.nativeEvent.layout.height;
-          }}
-          onScroll={trackScroll}
-          scrollEventThrottle={100}
-          showsVerticalScrollIndicator={false}
-        />
-        {!pinnedToBottom && transcriptRows.length > 0 && (
-          <GlassSurface fallbackColor={theme.surface} interactive style={styles.jumpButton}>
-            <Pressable
-              accessibilityLabel="Scroll to latest"
-              accessibilityRole="button"
-              onPress={() => listRef.current?.scrollToEnd({ animated: true })}
-              style={({ pressed }) => [styles.jumpButtonInner, { opacity: pressed ? 0.6 : 1 }]}>
-              <AppSymbol
-                name={{ ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' }}
-                size={15}
-                tintColor={theme.textSecondary}
-              />
-            </Pressable>
-          </GlassSurface>
+          </ActivitySheetHost>
+        ) : (
+          <View style={styles.placeholder}>
+            <SessionEmpty error={query.error} loading={query.isPending} missing={query.data === null} />
+          </View>
+        )}
+        {Boolean(devPrompt && probe.text) && (
+          <View pointerEvents="none" style={[styles.devBadge, { top: headerInset + 8 }]}>
+            <Text style={styles.devBadgeText}>{probe.text}</Text>
+          </View>
         )}
       </View>
-      {session && <MobileComposer session={session} />}
+      <ScreenHeaderBackdrop visible={underHeader} />
+      {session && (
+        <MobileComposer
+          session={session}
+          onSubmitted={() => listRef.current?.followNextGrowth()}
+        />
+      )}
 
       <Sheet onDismiss={() => setMenuOpen(false)} visible={menuOpen}>
         <SheetRow
@@ -223,6 +222,14 @@ export function SessionView({ sessionId }: { sessionId: string | undefined }) {
           onPress={() => {
             setMenuOpen(false);
             void copyLastResponse();
+          }}
+        />
+        <SheetRow
+          label="Reload transcript"
+          leading={<AppSymbol name={{ ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' }} size={16} tintColor={theme.textSecondary} />}
+          onPress={() => {
+            setMenuOpen(false);
+            void query.refetch();
           }}
         />
         <SheetRow
@@ -247,345 +254,77 @@ export function SessionView({ sessionId }: { sessionId: string | undefined }) {
   );
 }
 
-function OfflineBanner() {
-  const theme = useTheme();
-  return (
-    <View style={[styles.offlineBanner, { backgroundColor: theme.dangerSoft }]}>
-      <AppSymbol
-        name={{ ios: 'wifi.slash', android: 'wifi_off', web: 'wifi_off' }}
-        size={14}
-        tintColor={theme.danger}
-      />
-      <Text style={[styles.offlineText, { color: theme.danger }]}>
-        Reconnecting — showing cached messages
-      </Text>
-    </View>
-  );
-}
+/**
+ * Dev-only motion probe. Screen recorders capture ~8 real fps and cannot
+ * tell a seated stream from a bouncing one; the scroll events can. While a
+ * stream is followed the native offset must read 0 — `drift` is the largest
+ * untouched offset seen in the last second, and `grow` counts content-size
+ * commits, so "drift 0" across a fast stream is the pass condition.
+ */
+function useDevProbe(enabled: boolean) {
+  const [status, setStatus] = useState('');
+  const [text, setText] = useState('');
+  const samples = useRef<TranscriptDevSample[]>([]);
+  const rates = useRef<Array<{ at: number; count: number; flips: number }>>([]);
+  const growths = useRef(0);
+  const lastHeight = useRef(0);
 
-function TranscriptRowView({
-  row,
-  onToggleFold,
-}: {
-  row: TranscriptRow;
-  onToggleFold: (turnId: string) => void;
-}) {
-  switch (row.kind) {
-    case 'message':
-      return <MessageRow footerTimestamp={row.footerTimestamp} message={row.message} />;
-    case 'activities':
-      return <ActivityGroup block={row.block} live={row.live} />;
-    case 'fold':
-      return (
-        <FoldRow
-          expanded={row.expanded}
-          label={row.label}
-          onPress={() => onToggleFold(row.turn.id)}
-        />
-      );
-    case 'changed':
-      return <ChangedFilesCard checkpoint={row.checkpoint} />;
-  }
-}
-
-/** Desktop's turn fold: a hairline divider carrying "Worked for X ›". */
-function FoldRow({
-  label,
-  expanded,
-  onPress,
-}: {
-  label: string;
-  expanded: boolean;
-  onPress: () => void;
-}) {
-  const theme = useTheme();
-  return (
-    <Pressable
-      accessibilityHint={expanded ? 'Collapses the agent’s work' : 'Shows the agent’s work'}
-      accessibilityLabel={label}
-      accessibilityRole="button"
-      accessibilityState={{ expanded }}
-      onPress={onPress}
-      style={({ pressed }) => [styles.foldRow, { opacity: pressed ? 0.6 : 1 }]}>
-      <View style={[styles.foldLine, { backgroundColor: theme.border }]} />
-      <Text numberOfLines={1} style={[styles.foldLabel, { color: theme.textTertiary }]}>
-        {label}
-      </Text>
-      <AppSymbol
-        name={expanded
-          ? { ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }
-          : { ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
-        size={10}
-        tintColor={theme.textGhost}
-      />
-      <View style={[styles.foldLine, { backgroundColor: theme.border }]} />
-    </Pressable>
-  );
-}
-
-function MessageRow({
-  message,
-  footerTimestamp,
-}: {
-  message: Message;
-  footerTimestamp: number | null;
-}) {
-  const theme = useTheme();
-  const content = message.display_content ?? message.content;
-
-  async function copy() {
-    await Clipboard.setStringAsync(message.content);
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  }
-
-  if (message.role === 'system') {
-    return (
-      <View style={styles.systemFrame}>
-        <Text style={[styles.systemMessage, { backgroundColor: theme.overlay, color: theme.textTertiary }]}>
-          {content}
-        </Text>
-      </View>
-    );
-  }
-  if (message.role === 'user') {
-    return (
-      <View style={[styles.messageFrame, styles.userFrame]}>
-        <Pressable
-          accessibilityHint="Long press to copy"
-          delayLongPress={350}
-          onLongPress={() => void copy()}
-          style={[styles.userBubble, { backgroundColor: theme.raised }]}>
-          <Text selectable style={[styles.userText, { color: theme.text }]}>{content}</Text>
-          {message.attachments?.length ? (
-            <View style={styles.attachments}>
-              {message.attachments.map((attachment) => (
-                <View
-                  key={`${attachment.path}:${attachment.name}`}
-                  style={[styles.attachment, { backgroundColor: theme.overlayStrong }]}>
-                  <AppSymbol
-                    name={{
-                      ios: attachment.is_image ? 'photo' : 'doc',
-                      android: attachment.is_image ? 'image' : 'description',
-                      web: 'description',
-                    }}
-                    size={12}
-                    tintColor={theme.textSecondary}
-                  />
-                  <Text numberOfLines={1} style={[styles.attachmentText, { color: theme.textSecondary }]}>
-                    {attachment.name}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          ) : null}
-        </Pressable>
-      </View>
-    );
-  }
-  return (
-    <View style={styles.messageFrame}>
-      <Pressable delayLongPress={350} onLongPress={() => void copy()}>
-        <MarkdownMessage value={content} />
-      </Pressable>
-      {footerTimestamp != null && !message.streaming && (
-        <Text style={[styles.messageFooter, { color: theme.textGhost }]}>
-          {formatMessageTime(footerTimestamp)}
-        </Text>
-      )}
-    </View>
-  );
-}
-
-function ChangedFilesCard({ checkpoint }: { checkpoint: Checkpoint }) {
-  const theme = useTheme();
-  const [open, setOpen] = useState(false);
-  return (
-    <View style={[styles.changedCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => setOpen((value) => !value)}
-        style={({ pressed }) => [styles.changedHeader, { opacity: pressed ? 0.6 : 1 }]}>
-        <AppSymbol
-          name={{ ios: 'plusminus', android: 'difference', web: 'difference' }}
-          size={13}
-          tintColor={theme.textSecondary}
-        />
-        <Text style={[styles.changedTitle, { color: theme.textSecondary }]}>
-          {checkpoint.files.length} file{checkpoint.files.length === 1 ? '' : 's'} changed
-        </Text>
-        <Text style={styles.changedStats}>
-          <Text style={{ color: theme.success }}>+{checkpoint.additions}</Text>
-          <Text style={{ color: theme.textGhost }}> </Text>
-          <Text style={{ color: theme.danger }}>−{checkpoint.deletions}</Text>
-        </Text>
-        <AppSymbol
-          name={open
-            ? { ios: 'chevron.up', android: 'keyboard_arrow_up', web: 'keyboard_arrow_up' }
-            : { ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }}
-          size={11}
-          tintColor={theme.textGhost}
-        />
-      </Pressable>
-      {open && (
-        <View style={[styles.changedFiles, { borderTopColor: theme.border }]}>
-          {checkpoint.files.map((file) => (
-            <View key={file.path} style={styles.changedFileRow}>
-              <Text numberOfLines={1} style={[styles.changedFilePath, { color: theme.text }]}>
-                {file.path}
-              </Text>
-              <Text style={styles.changedStats}>
-                <Text style={{ color: theme.success }}>+{file.additions}</Text>
-                <Text style={{ color: theme.textGhost }}> </Text>
-                <Text style={{ color: theme.danger }}>−{file.deletions}</Text>
-              </Text>
-            </View>
-          ))}
-        </View>
-      )}
-    </View>
-  );
-}
-
-function WorkingFooter({ session }: { session: AgentSession }) {
-  const theme = useTheme();
-  const startedAt = session.turns.at(-1)?.started_at ?? null;
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1_000));
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Math.floor(Date.now() / 1_000)), 1_000);
-    return () => clearInterval(timer);
+  const sample = useCallback((next: TranscriptDevSample) => {
+    if (next.contentHeight !== lastHeight.current) {
+      if (lastHeight.current > 0) growths.current += 1;
+      lastHeight.current = next.contentHeight;
+    }
+    samples.current.push(next);
   }, []);
-  const elapsed = startedAt ? Math.max(0, now - startedAt) : null;
-  return (
-    <View style={styles.workingFooter}>
-      <ActivityIndicator color={theme.textTertiary} size="small" />
-      <Text style={[styles.workingText, { color: theme.textTertiary }]}>
-        {session.status === 'waiting'
-          ? 'Waiting for you'
-          : elapsed != null
-            ? `Working for ${formatWorkingElapsed(elapsed)}`
-            : 'Working'}
-      </Text>
-    </View>
-  );
-}
 
-function SessionEmpty({
-  loading,
-  error,
-  missing,
-}: {
-  loading: boolean;
-  error: unknown;
-  missing: boolean;
-}) {
-  const theme = useTheme();
-  if (loading) return <ActivityIndicator color={theme.textTertiary} />;
-  return (
-    <View style={styles.empty}>
-      <Text style={[styles.emptyTitle, { color: theme.text }]}>
-        {missing ? 'Task not found' : error ? 'Couldn’t load this task' : 'No messages yet'}
-      </Text>
-      {Boolean(error) && (
-        <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
-          {error instanceof Error ? error.message : String(error)}
-        </Text>
-      )}
-    </View>
-  );
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const recent = samples.current.filter((item) => now - item.at < 1_000);
+      samples.current = recent;
+      let drift = 0;
+      for (const item of recent) {
+        if (!item.touching) drift = Math.max(drift, item.offset);
+      }
+      const latest = recent.at(-1);
+      const scrolls = recent.filter((item) => item.source === 'scroll');
+      // Direction reversals between consecutive scroll samples: an animation
+      // is monotonic, a compensation fight alternates.
+      let flips = 0;
+      for (let ix = 2; ix < scrolls.length; ix += 1) {
+        const a = scrolls[ix - 1]!.offset - scrolls[ix - 2]!.offset;
+        const b = scrolls[ix]!.offset - scrolls[ix - 1]!.offset;
+        if (a * b < 0) flips += 1;
+      }
+      // Peaks over the last five seconds survive the snapshot latency of an
+      // external reader.
+      rates.current = [
+        ...rates.current.filter((item) => now - item.at < 5_000),
+        { at: now, count: scrolls.length, flips },
+      ];
+      const peak = Math.max(...rates.current.map((item) => item.count));
+      const peakFlips = Math.max(...rates.current.map((item) => item.flips));
+      setText(
+        `dev: ${status} · scr ${scrolls.length}/s (peak ${peak}, flips ${peakFlips}) · size ${recent.length - scrolls.length}/s · off ${latest ? latest.offset.toFixed(0) : '–'} · drift ${drift.toFixed(0)} · grow ${growths.current} · touch ${latest ? (latest.touching ? 1 : 0) : '–'}`,
+      );
+    }, 500);
+    return () => clearInterval(timer);
+  }, [enabled, status]);
+
+  return { sample, setStatus, text: enabled ? text : '' };
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  listFrame: { flex: 1 },
-  content: { paddingBottom: 40, paddingHorizontal: Spacing.three },
-  emptyContent: { flexGrow: 1, justifyContent: 'center' },
-  offlineBanner: {
-    alignItems: 'center',
-    borderRadius: Radius.medium,
-    flexDirection: 'row',
-    gap: 7,
-    marginBottom: 12,
-    padding: 10,
-  },
-  offlineText: { fontSize: 12.5, fontWeight: '600' },
-  messageFrame: { marginBottom: 14, marginTop: 4 },
-  userFrame: { alignItems: 'flex-end', marginTop: 8 },
-  userBubble: {
-    borderRadius: Radius.large,
-    borderBottomRightRadius: 6,
-    maxWidth: '88%',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  userText: { fontSize: 15.5, lineHeight: 22 },
-  messageFooter: { fontSize: 10.5, marginTop: 5 },
-  systemFrame: { alignItems: 'center', marginBottom: 16 },
-  systemMessage: {
-    borderRadius: Radius.pill,
-    fontSize: 11.5,
-    lineHeight: 16,
-    overflow: 'hidden',
-    paddingHorizontal: 11,
-    paddingVertical: 5,
-    textAlign: 'center',
-  },
-  attachments: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 9 },
-  attachment: {
-    alignItems: 'center',
-    borderRadius: Radius.small,
-    flexDirection: 'row',
-    gap: 5,
-    maxWidth: 220,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  attachmentText: { flexShrink: 1, fontSize: 11.5 },
-  foldRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 9,
-    marginBottom: 6,
-    marginTop: 2,
-    minHeight: 28,
-  },
-  foldLine: { flex: 1, height: StyleSheet.hairlineWidth },
-  foldLabel: { flexShrink: 1, fontSize: 12, fontWeight: '500' },
-  changedCard: {
-    borderRadius: Radius.medium,
-    borderWidth: StyleSheet.hairlineWidth,
-    marginBottom: 18,
-    marginTop: 2,
-    overflow: 'hidden',
-  },
-  changedHeader: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: 8,
-    minHeight: 40,
-    paddingHorizontal: 11,
-  },
-  changedTitle: { flex: 1, fontSize: 12.5, fontWeight: '600' },
-  changedStats: { fontSize: 11.5, fontVariant: ['tabular-nums'], fontWeight: '600' },
-  changedFiles: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    gap: 6,
-    paddingHorizontal: 11,
-    paddingVertical: 9,
-  },
-  changedFileRow: { alignItems: 'center', flexDirection: 'row', gap: 8 },
-  changedFilePath: { flex: 1, fontFamily: MonoFont, fontSize: 11 },
-  jumpButton: {
-    borderRadius: Radius.pill,
-    bottom: 12,
-    height: 40,
+  body: { flex: 1 },
+  placeholder: { alignItems: 'center', flex: 1, justifyContent: 'center', paddingHorizontal: 32 },
+  devBadge: {
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    borderRadius: 6,
+    left: 12,
+    padding: 6,
     position: 'absolute',
-    right: 14,
-    width: 40,
   },
-  jumpButtonInner: { alignItems: 'center', flex: 1, justifyContent: 'center' },
-  workingFooter: { alignItems: 'center', flexDirection: 'row', gap: 8, paddingBottom: 8, paddingLeft: 2, paddingVertical: 10 },
-  workingText: { fontSize: 12.5, fontVariant: ['tabular-nums'], fontWeight: '500' },
-  empty: { alignItems: 'center', paddingHorizontal: 32 },
-  emptyTitle: { fontSize: 17, fontWeight: '700', textAlign: 'center' },
-  emptyBody: { fontSize: 13.5, lineHeight: 19, marginTop: 8, textAlign: 'center' },
+  devBadgeText: { color: '#fff', fontSize: 11 },
 });

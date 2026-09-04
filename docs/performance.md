@@ -53,9 +53,9 @@ Everything during a stream happens at one of two rates, and every change to
 the pipeline must keep it that way:
 
 **Commits, ≤ ~8.3 Hz.** Provider chunks queue for a full
-`STREAM_FRAME_INTERVAL` (120 ms, matching Zeron's `STREAM_COMMIT_MS`) and fold
-into one drain → one notify → one tail remeasure
-([src/app.rs](../src/app.rs), [src/app/runtime.rs](../src/app/runtime.rs)).
+`STREAM_FRAME_INTERVAL` (120 ms) and fold into one drain → one notify → one
+tail remeasure ([src/app.rs](../src/app.rs),
+[src/app/runtime.rs](../src/app/runtime.rs)).
 Two hard-won rules:
 
 - The pump timer must **not** race the wake channel. It used to, which made
@@ -69,9 +69,9 @@ Two hard-won rules:
   while text streamed at 10% was this one flag.
 
 **Pulse ticks, ≤ ~30 Hz.** All repeating animation rides the shared
-self-parking clock in [src/ui/motion.rs](../src/ui/motion.rs) (ported from
-Zeron): loaders read a phase from a shared epoch, leases expire 300 ms after
-the loader last painted, and the clock parks when no leases remain. Never use
+self-parking clock in [src/ui/motion.rs](../src/ui/motion.rs): loaders read
+a phase from a shared epoch, leases expire 300 ms after the loader last
+painted, and the clock parks when no leases remain. Never use
 `with_animation(...).repeat()` — it re-arms `request_animation_frame` every
 display frame. A view's whole subtree rebuilds per tick, so cadence is priced
 per *view*, not per animation: leases carry a stride (`spin_slow`,
@@ -151,6 +151,6 @@ row (gpui `list()` semantics). If that ever needs to shrink: fork-level cached
 list rows need a measure-once extension to `ViewElement` caching (cached views
 lay out from style, not content, which breaks the list's measurement as-is);
 alternatively fold activities into the virtualized list as block-granularity
-rows the way Zeron does. Smaller levers, in memory and unproven: stable
+rows. Smaller levers, in memory and unproven: stable
 `StyledText` element ids for gpui's per-element layout memo, and the per-row
 `Message` clones in the row builder.

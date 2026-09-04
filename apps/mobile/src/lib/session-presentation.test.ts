@@ -1,13 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 import type { AgentSession, AgentTurn, Project } from '@waku/client';
+import { activitiesForBlock } from '@waku/client/event-reducer';
 
+import { TranscriptMarkdownCache } from '../md/transcript-cache';
 import {
-  displaySessionTitle,
+  buildTranscriptPipeline,
   buildTranscriptRows,
   contextPercent,
+  displaySessionTitle,
+  expandTranscriptRows,
+  findActivityBlock,
   groupSessions,
   relativeSessionTime,
   sessionDateGroup,
+  stabilizeTranscriptRows,
 } from './session-presentation';
 
 describe('mobile session presentation', () => {
@@ -53,9 +59,9 @@ describe('mobile session presentation', () => {
       transcript_blocks: [activityBlock(1, 'turn')],
     });
     expect(buildTranscriptRows(current).map((row) => row.kind)).toEqual([
-      'message',
+      'user',
       'activities',
-      'message',
+      'md',
     ]);
   });
 
@@ -69,16 +75,16 @@ describe('mobile session presentation', () => {
       transcript_blocks: [activityBlock(1, 'turn')],
     });
     const collapsed = buildTranscriptRows(current);
-    expect(collapsed.map((row) => row.kind)).toEqual(['message', 'fold', 'message']);
+    expect(collapsed.map((row) => row.kind)).toEqual(['user', 'fold', 'md']);
     const fold = collapsed[1]!;
     if (fold.kind !== 'fold') throw new Error('expected fold');
     expect(fold.label).toBe('Worked for 2 minutes');
     const answer = collapsed[2]!;
-    if (answer.kind !== 'message') throw new Error('expected message');
+    if (answer.kind !== 'md') throw new Error('expected md');
     expect(answer.footerTimestamp).toBe(130);
 
     const expanded = buildTranscriptRows(current, new Set(['turn']));
-    expect(expanded.map((row) => row.kind)).toEqual(['message', 'fold', 'activities', 'message']);
+    expect(expanded.map((row) => row.kind)).toEqual(['user', 'fold', 'activities', 'md']);
   });
 
   test('folds thoughts too — a thought-only turn shows just the answer', () => {
@@ -107,9 +113,9 @@ describe('mobile session presentation', () => {
       }],
     });
     expect(buildTranscriptRows(current).map((row) => row.kind)).toEqual([
-      'message',
+      'user',
       'fold',
-      'message',
+      'md',
     ]);
   });
 
@@ -125,16 +131,16 @@ describe('mobile session presentation', () => {
     });
     const collapsed = buildTranscriptRows(current);
     expect(collapsed.map((row) => (
-      row.kind === 'message' ? `message:${row.message.id}` : row.kind
-    ))).toEqual(['message:user', 'fold', 'message:part2']);
+      row.kind === 'md' ? `md:${row.messageId}` : row.kind
+    ))).toEqual(['user', 'fold', 'md:part2']);
     const answer = collapsed[2]!;
-    if (answer.kind !== 'message') throw new Error('expected message');
+    if (answer.kind !== 'md') throw new Error('expected md');
     expect(answer.footerTimestamp).toBe(40);
 
     const expanded = buildTranscriptRows(current, new Set(['turn']));
     expect(expanded.map((row) => (
-      row.kind === 'message' ? `message:${row.message.id}` : row.kind
-    ))).toEqual(['message:user', 'fold', 'message:part1', 'activities', 'message:part2']);
+      row.kind === 'md' ? `md:${row.messageId}` : row.kind
+    ))).toEqual(['user', 'fold', 'md:part1', 'activities', 'md:part2']);
   });
 
   test('keeps a running turn’s work expanded and live', () => {
@@ -147,7 +153,7 @@ describe('mobile session presentation', () => {
       transcript_blocks: [activityBlock(1, 'turn')],
     });
     const rows = buildTranscriptRows(current);
-    expect(rows.map((row) => row.kind)).toEqual(['message', 'activities']);
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'activities']);
     const activities = rows[1]!;
     if (activities.kind !== 'activities') throw new Error('expected activities');
     expect(activities.live).toBe(true);
@@ -177,10 +183,113 @@ describe('mobile session presentation', () => {
       transcript_blocks: [],
     });
     expect(buildTranscriptRows(current).map((row) => row.kind)).toEqual([
-      'message',
-      'message',
+      'user',
+      'md',
       'changed',
     ]);
+  });
+
+  test('splits assistant messages into block rows with the spacing tokens', () => {
+    const current = session({
+      status: 'working',
+      turns: [turn({ id: 'turn', status: 'running', started_at: 10, completed_at: null })],
+      messages: [
+        { id: 'user', turn_id: 'turn', role: 'user', content: 'go', created_at: 1, streaming: false },
+        {
+          id: 'agent',
+          turn_id: 'turn',
+          role: 'assistant',
+          content: '# Title\n\nFirst paragraph.\n\nSecond paragraph grows',
+          created_at: 2,
+          streaming: true,
+        },
+      ],
+    });
+    const rows = buildTranscriptRows(current);
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'md', 'md', 'md']);
+    expect(rows.map((row) => row.kind === 'md' ? row.live : null)).toEqual([
+      null, false, false, true,
+    ]);
+    expect(rows.map((row) => row.topGap)).toEqual([26, 16, 12, 12]);
+    expect(rows[1]!.key).toBe('md:agent.0');
+    expect(rows[3]!.key).toBe('md:agent.2');
+  });
+
+  test('a windowed tail lays out exactly like the full transcript', () => {
+    const current = session({
+      turns: [
+        turn({ id: 't1', status: 'completed', started_at: 10, completed_at: 20 }),
+        turn({ id: 't2', status: 'completed', started_at: 30, completed_at: 40 }),
+      ],
+      messages: [
+        { id: 'u1', turn_id: 't1', role: 'user', content: 'one', created_at: 1, streaming: false },
+        { id: 'a1', turn_id: 't1', role: 'assistant', content: 'First.\n\nSecond.', created_at: 2, streaming: false },
+        { id: 'u2', turn_id: 't2', role: 'user', content: 'two', created_at: 3, streaming: false },
+        { id: 'a2', turn_id: 't2', role: 'assistant', content: 'Third.', created_at: 4, streaming: false },
+      ],
+      transcript_blocks: [activityBlock(1, 't1'), activityBlock(3, 't2')],
+    });
+    const md = new TranscriptMarkdownCache();
+    const pipeline = buildTranscriptPipeline(current);
+    expect(pipeline.map((row) => row.kind)).toEqual([
+      'message', 'fold', 'message', 'message', 'fold', 'message',
+    ]);
+    const full = expandTranscriptRows(pipeline, md, 0);
+    const tail = expandTranscriptRows(pipeline, md, 3);
+    expect(tail.map((row) => row.key)).toEqual(full.slice(-3).map((row) => row.key));
+    expect(tail.map((row) => row.topGap)).toEqual(full.slice(-3).map((row) => row.topGap));
+    // The first mounted row measures its gap against the unmounted row
+    // before it — here the fold above the first answer.
+    const fromAnswer = expandTranscriptRows(pipeline, md, 2);
+    expect(fromAnswer.map((row) => row.key).slice(0, 2)).toEqual(['md:a1.0', 'md:a1.1']);
+    expect(fromAnswer.map((row) => row.topGap).slice(0, 2)).toEqual([12, 12]);
+  });
+
+  test('stabilizes row identity across commits so memoized rows bail out', () => {
+    const md = new TranscriptMarkdownCache();
+    const before = buildTranscriptRows(session({
+      status: 'working',
+      turns: [turn({ id: 'turn', status: 'running', started_at: 10, completed_at: null })],
+      messages: [
+        { id: 'user', turn_id: 'turn', role: 'user', content: 'go', created_at: 1, streaming: false },
+        { id: 'agent', turn_id: 'turn', role: 'assistant', content: 'One.\n\nTwo', created_at: 2, streaming: true },
+      ],
+    }), new Set(), md);
+    const after = buildTranscriptRows(session({
+      status: 'working',
+      turns: [turn({ id: 'turn', status: 'running', started_at: 10, completed_at: null })],
+      messages: [
+        before[0]!.kind === 'user' ? before[0].message : (() => { throw new Error('user'); })(),
+        { id: 'agent', turn_id: 'turn', role: 'assistant', content: 'One.\n\nTwo more', created_at: 2, streaming: true },
+      ],
+    }), new Set(), md);
+    const stable = stabilizeTranscriptRows(before, after);
+    expect(stable[0]).toBe(before[0]!);
+    expect(stable[1]).toBe(before[1]!);
+    expect(stable[2]).not.toBe(before[2]!);
+    expect(stable[2]!.kind === 'md' && stable[2].source).toBe('Two more');
+    expect(stabilizeTranscriptRows(stable, stabilizeTranscriptRows(stable, after))).toBe(stable);
+  });
+});
+
+describe('activity sheet locator', () => {
+  test('trusts the index hint only while the anchor still matches', () => {
+    const first = activityBlock(0, 'turn');
+    const second = activityBlock(1, 'turn');
+    const current = session({ transcript_blocks: [first, second] });
+    expect(findActivityBlock(current, { blockIndex: 1, turnId: 'turn', afterMessage: 1 })).toBe(second);
+    // A rewind dropped a block in front: the hint is stale, the anchor is not.
+    expect(findActivityBlock(current, { blockIndex: 1, turnId: 'turn', afterMessage: 0 })).toBe(first);
+    expect(findActivityBlock(current, { blockIndex: 0, turnId: 'other', afterMessage: 0 })).toBeNull();
+  });
+
+  test('survives the per-commit clone by resolving against the new session', () => {
+    const before = session({ transcript_blocks: [activityBlock(0, 'turn')] });
+    const after = JSON.parse(JSON.stringify(before)) as AgentSession;
+    activitiesForBlock(after.transcript_blocks[0]!)[0]!.output = 'streamed';
+    const target = { blockIndex: 0, turnId: 'turn', afterMessage: 0 };
+    expect(activitiesForBlock(findActivityBlock(before, target)!)[0]!.output).toBeUndefined();
+    expect(activitiesForBlock(findActivityBlock(after, target)!)[0]!.output).toBe('streamed');
   });
 });
 
