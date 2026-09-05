@@ -523,12 +523,24 @@ fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
 fn read_server_message<S: std::io::Read + std::io::Write>(
     socket: &mut WebSocket<S>,
 ) -> anyhow::Result<ServerMessage> {
+    // The iroh bridge surfaces WouldBlock on a 25ms poll cadence and the TCP
+    // transport on its SO_RCVTIMEO; both are retryable. The daemon's hello
+    // reply over a relay takes far longer than one poll interval, so retry
+    // those instead of failing the handshake on the first empty poll — but
+    // still bound the whole wait so a dead peer does not hang the connect.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
-        match socket.read()? {
-            Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
-            Message::Ping(_) => socket.flush()?,
-            Message::Close(_) => bail!("Waku daemon closed during handshake"),
-            _ => {}
+        match socket.read() {
+            Ok(Message::Text(text)) => return Ok(serde_json::from_str(text.as_ref())?),
+            Ok(Message::Ping(_)) => socket.flush()?,
+            Ok(Message::Close(_)) => bail!("Waku daemon closed during handshake"),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(error).context("timed out waiting for the daemon handshake");
+                }
+            }
+            Err(error) => return Err(error.into()),
         }
     }
 }

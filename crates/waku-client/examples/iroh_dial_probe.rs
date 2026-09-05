@@ -103,10 +103,28 @@ fn wire_loop(
     socket
         .write_message(tungstenite::Message::text(payload.to_string()))
         .map_err(|error| anyhow::anyhow!("write hello: {error:#}"))?;
-    let reply = socket
-        .read_message()
-        .map_err(|error| anyhow::anyhow!("read hello reply: {error:#}"))?;
+    let reply = read_retry(&mut socket, "hello reply")?;
     println!("daemon hello reply: {reply}");
+
+    // Follow the mobile client: request settings right after the hello.
+    let request_id = uuid::Uuid::new_v4();
+    let request = serde_json::json!({
+        "type": "request",
+        "requestId": request_id.to_string(),
+        "sessionId": uuid::Uuid::nil().to_string(),
+        "runtimeId": uuid::Uuid::nil().to_string(),
+        "command": { "type": "getSettings" },
+    });
+    socket
+        .write_message(tungstenite::Message::text(request.to_string()))
+        .map_err(|error| anyhow::anyhow!("write request: {error:#}"))?;
+    println!("request sent, waiting for response…");
+    let reply = read_retry(&mut socket, "settings response")?;
+    println!(
+        "response ({} bytes): {}…",
+        reply.to_string().len(),
+        &reply.to_string()[..reply.to_string().len().min(200)]
+    );
 
     // Keep the connection open briefly and echo any pushed messages, to test
     // whether the daemon can push over the relay path.
@@ -126,4 +144,23 @@ fn wire_loop(
         }
     }
     Ok(())
+}
+
+/// The iroh bridge reads with a short poll that surfaces `WouldBlock`; the
+/// real client loops retry it. Mirror that here.
+fn read_retry(
+    socket: &mut tungstenite::WebSocket<waku_protocol::IrohBridge>,
+    label: &str,
+) -> anyhow::Result<tungstenite::Message> {
+    loop {
+        match socket.read_message() {
+            Ok(message) => return Ok(message),
+            Err(tungstenite::Error::Io(error))
+                if error.kind() == std::io::ErrorKind::WouldBlock =>
+            {
+                continue;
+            }
+            Err(error) => anyhow::bail!("read {label}: {error:#}"),
+        }
+    }
 }
