@@ -140,19 +140,10 @@ fn open_main_window(cx: &mut App) {
     ) {
         Ok(_) => {
             log::info!("waku-mobile: window opened");
-            // Defer the persisted-ticket reconnect a tick so the window's
-            // platform callbacks (active-status registration) settle first;
-            // dialing immediately races gpui-mobile's launch sequence.
-            let entity = entity.clone();
-            cx.spawn(async move |app| {
-                app.background_executor()
-                    .timer(std::time::Duration::from_millis(400))
-                    .await;
-                let _ = entity.update(app, |this, cx| {
-                    this.reconnect_saved(cx);
-                });
-            })
-            .detach();
+            // No auto-reconnect at launch: dialing a stale ticket hangs the
+            // UI in "connecting" and users cannot tell whether the host is
+            // down or the ticket expired. The saved ticket is pre-filled in
+            // the connect screen's input instead — one tap to reconnect.
         }
         Err(error) => {
             log::error!("waku-mobile: open_window failed: {error}");

@@ -94,6 +94,7 @@ impl FromStr for RemoteTicket {
     }
 }
 
+/// A synchronous byte stream backed by an iroh QUIC bi-stream.
 /// Poll cadence for bridging an iroh QUIC stream into a synchronous
 /// [`io::Read`] / [`io::Write`]. Matches the WebSocket transport's
 /// SO_RCVTIMEO contract so a shared message loop sees `WouldBlock` and
@@ -106,7 +107,8 @@ const IROH_CHUNK_CAPACITY: usize = 64 * 1024;
 /// A tokio task pumps `RecvStream` bytes into an unbounded channel that
 /// [`Read`] drains with a short poll; writes go through a bounded channel to
 /// a task that `write_all`s them to the `SendStream`. Reads time out with
-/// `WouldBlock`, matching the TCP transport's SO_RCVTIMEO polling contract.
+/// `WouldBlock` on the poll cadence so the shared message loop keeps
+/// draining its outgoing queue; see [`IrohBridge::read`].
 ///
 /// The runtime must outlive the bridge; pump tasks are spawned on the given
 /// handle, so the caller owns the [`tokio::runtime::Runtime`].
@@ -177,6 +179,13 @@ impl io::Read for IrohBridge {
         if self.eof {
             return Ok(0);
         }
+        // Poll instead of blocking forever: the shared message loop only
+        // drains its outgoing response queue between reads, so a read that
+        // never returns would starve responses already queued for this peer
+        // (observed as the client's request timing out even though the QUIC
+        // connection was healthy). Surface `WouldBlock` on the poll expiry
+        // — both the daemon and client loops treat it as retryable, matching
+        // the TCP transport's SO_RCVTIMEO polling contract.
         match self.recv_rx.recv_timeout(IROH_POLL_INTERVAL) {
             Ok(chunk) => {
                 let n = buf.len().min(chunk.len());

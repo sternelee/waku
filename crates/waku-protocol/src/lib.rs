@@ -59,7 +59,7 @@ pub use protocol::{
     WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
 };
 pub use remote::{
-    IROH_ALPN, IROH_POLL_INTERVAL, IROH_RELAY_URL_ENV, IrohBridge, OFFICIAL_RELAY_URL,
+    IROH_ALPN, IROH_RELAY_URL_ENV, IrohBridge, OFFICIAL_RELAY_URL,
     RemoteTicket, resolve_relay_url,
 };
 pub use settings::DaemonSettings;

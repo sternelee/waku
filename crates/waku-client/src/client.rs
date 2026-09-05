@@ -103,11 +103,25 @@ impl DaemonClient {
         let endpoint = runtime
             .block_on(bind_client_endpoint())
             .context("failed to bind iroh client endpoint")?;
+        // Bound the whole dial. A stale ticket's direct addresses fail fast,
+        // but a relay path through a hostile network can hang `connect` (it
+        // has no internal timeout) and the UI would show "connecting"
+        // forever.
+        const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
         let connection = runtime
-            .block_on(endpoint.connect(ticket.endpoint_addr.clone(), IROH_ALPN))
+            .block_on(async {
+                tokio::time::timeout(DIAL_TIMEOUT, endpoint.connect(ticket.endpoint_addr.clone(), IROH_ALPN))
+                    .await
+            })
+            .map_err(|_| anyhow::anyhow!(
+                "连接超时（20 秒）：远程主机不可达。票据可能已过期（主机重启过），请重新扫码"
+            ))?
             .context("could not connect to Waku daemon over iroh")?;
         let (send, recv) = runtime
-            .block_on(connection.open_bi())
+            .block_on(async {
+                tokio::time::timeout(DIAL_TIMEOUT, connection.open_bi()).await
+            })
+            .map_err(|_| anyhow::anyhow!("连接超时（20 秒）：无法打开控制流"))?
             .context("could not open iroh control stream")?;
 
         let bridge = IrohBridge::new(send, recv, runtime.handle());

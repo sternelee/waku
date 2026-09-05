@@ -185,14 +185,6 @@ impl WakuMobile {
         })
     }
 
-    /// Reconnect the persisted ticket at launch, silently.
-    pub fn reconnect_saved(&mut self, cx: &mut Context<Self>) {
-        let Some(ticket) = self.saved_ticket.clone() else {
-            return;
-        };
-        self.connect(ticket, true, cx);
-    }
-
     // ── Connection ──
 
     pub fn connect(&mut self, ticket: String, persist: bool, cx: &mut Context<Self>) {
@@ -391,10 +383,13 @@ impl WakuMobile {
         };
 
         // Optimistic transcript: the user bubble lands now, the turn starts
-        // when the daemon confirms.
+        // when the daemon confirms. The local ids ride with the prompt so the
+        // daemon's PromptSubmitted broadcast mirrors exactly these rows
+        // instead of minting duplicates for attached followers.
         let turn_id = Uuid::new_v4();
+        let prompt_message_id = Uuid::new_v4();
         let prompt_message = Message {
-            id: Uuid::new_v4(),
+            id: prompt_message_id,
             turn_id: Some(turn_id),
             role: MessageRole::User,
             display_content: None,
@@ -460,7 +455,11 @@ impl WakuMobile {
                                 if let Err(error) = client.notify(
                                     session_id,
                                     runtime_id,
-                                    waku_client::Command::Prompt { prompt },
+                                    waku_client::Command::Prompt {
+                                        prompt,
+                                        turn_id: Some(turn_id),
+                                        message_id: Some(prompt_message_id),
+                                    },
                                 ) {
                                     chat.session.status = SessionStatus::Failed;
                                     chat.error = Some(error.to_string());
@@ -735,6 +734,21 @@ impl ChatSession {
                 self.session.auto_title = title;
             }
             DriverEvent::AvailableCommands(_) => {}
+            DriverEvent::PromptSubmitted {
+                message,
+                turn_id,
+                message_id,
+            } => {
+                // The daemon broadcasts every submission. The submitting
+                // client already pushed the same user message with the ids it
+                // sent; adopt_submitted_prompt is a no-op then. A follower
+                // (or a client that lost its optimistic row) mirrors the
+                // submission with the daemon-published ids.
+                self.session.adopt_submitted_prompt(&message, turn_id, message_id);
+                if self.session.status == SessionStatus::Connecting {
+                    // Keep Connecting — TurnStarted flips it to Working.
+                }
+            }
             DriverEvent::TurnStarted => {
                 self.session.status = SessionStatus::Working;
                 self.activity = None;
@@ -786,6 +800,10 @@ impl ChatSession {
             DriverEvent::UsageUpdated { .. } => {}
             DriverEvent::PlanUsageUpdated(_) => {}
             DriverEvent::GoalUpdated(_) => {}
+            // The turn stays open while detached work runs; the later wake's
+            // TurnStarted continues it. Nothing to show beyond the status
+            // already set.
+            DriverEvent::TurnParked => {}
             DriverEvent::TurnFinished { success, summary } => {
                 for message in &mut self.session.messages {
                     message.streaming = false;
